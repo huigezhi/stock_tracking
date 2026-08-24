@@ -339,8 +339,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"自选管理 Web UI 已启动: http://localhost:{PORT}")
+    # 公网部署时建议 WEBUI_HOST=127.0.0.1 仅本机监听, 通过SSH隧道访问
+    host = os.environ.get("WEBUI_HOST", "0.0.0.0")
+    port = int(os.environ.get("WEBUI_PORT", str(PORT)))
+    srv = ThreadingHTTPServer((host, port), Handler)
+    print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()
 
 
