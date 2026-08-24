@@ -94,13 +94,21 @@ def fetch_klines(code, tf, count):
             url = ("https://ifzq.gtimg.cn/appstock/app/kline/mkline"
                    f"?param={code},m{TF_MIN[tf]},,{count}")
             key = f"m{TF_MIN[tf]}"
+            r = S.get(url, timeout=10)
+            data = r.json()["data"][code]
         else:
             url = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get"
                    f"?param={code},{tf},,,{count},qfq")
-            key = "qfq" + tf
-        r = S.get(url, timeout=10)
-        data = r.json()["data"][code]
-        rows = data.get(key) or data.get(tf) or []
+            r = S.get(url, timeout=10)
+            try:
+                data = r.json()["data"][code]
+            except Exception:
+                # fqkline 被WAF拦截(501页面)时回退到非复权接口
+                url = ("https://ifzq.gtimg.cn/appstock/app/kline/kline"
+                       f"?param={code},{tf},,,{count}")
+                r = S.get(url, timeout=10)
+                data = r.json()["data"][code]
+        rows = data.get(tf) or data.get("qfq" + tf) or []
         return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
     except Exception as e:
         log.warning("获取K线失败 %s %s: %s", code, tf, e)

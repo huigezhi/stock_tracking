@@ -1,6 +1,6 @@
 {
-  "webhook_url": "",
-  "webhook_secret": "",
+  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/6aa8e948-5d81-4b32-985e-8f624de21dd0",
+  "webhook_secret": "etFEzZZwowZRlxiXiZVGge",
   "poll_interval_sec": 30,
   "signal_on_forming_bar": false,
   "timeframes": ["1m", "5m", "30m", "60m", "day", "week"],
