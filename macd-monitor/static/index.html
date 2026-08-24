@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MACD 监控 · 自选管理</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>MACD 监控 · 自选管理</h1>
+  <span class="sub">改动实时写入 config.json，监控进程自动热加载</span>
+  <select id="themeSel" onchange="setTheme(this.value)">
+    <option value="auto">跟随系统</option>
+    <option value="light">白天</option>
+    <option value="dark">夜间</option>
+  </select>
+</header>
+
+<main class="layout">
+  <!-- 左栏: 宽基ETF列表 -->
+  <aside class="panel etf-panel">
+    <div class="panel-head">
+      <h2>宽基ETF <small>份额≥100亿份</small></h2>
+      <span class="upd" id="etfUpd"></span>
+    </div>
+    <div id="etfList" class="etf-list"><div class="empty">加载中…</div></div>
+  </aside>
+
+  <!-- 中栏: K线图 -->
+  <section class="panel chart-panel">
+    <div class="chart-head">
+      <div class="ch-left">
+        <span class="ch-name" id="chName">--</span>
+        <span class="ch-code" id="chCode"></span>
+        <span class="ch-tag" id="chIndex"></span>
+      </div>
+      <div class="ch-quotes" id="chQuotes">
+        <span class="ch-price" id="chPrice">--</span>
+        <span class="ch-chg" id="chChg">--</span>
+        <span class="ch-item">成交额 <b id="chAmount">--</b></span>
+        <span class="ch-item">份额 <b id="chShares">--</b></span>
+      </div>
+      <div class="tf-tabs">
+        <button class="tf active" data-tf="day" onclick="switchTf('day')">日K</button>
+        <button class="tf" data-tf="week" onclick="switchTf('week')">周K</button>
+      </div>
+    </div>
+    <div class="chart-body" id="chartBody">
+      <canvas id="kchart"></canvas>
+      <div class="chart-tip" id="chartTip"></div>
+    </div>
+    <div class="chart-slider">
+      <div class="range-wrap" id="rangeWrap">
+        <div class="range-track"><div class="range-fill" id="rangeFill"></div></div>
+        <input type="range" id="rStart" min="0" max="100" value="0">
+        <input type="range" id="rEnd" min="0" max="100" value="100">
+        <span class="range-label" id="rStartLabel"></span>
+        <span class="range-label right" id="rEndLabel"></span>
+      </div>
+      <span class="slider-count" id="sliderCount"></span>
+    </div>
+  </section>
+
+  <!-- 右栏: MACD 监控 -->
+  <aside class="panel monitor-panel">
+    <div class="search-row">
+      <input id="q" placeholder="搜索：贵州茅台 / gzmt / 510300 / 沪深300" autofocus>
+      <button class="primary" onclick="doSearch()">搜索</button>
+    </div>
+    <div class="hint">支持 A 股、指数、ETF / LOF</div>
+    <div id="results"></div>
+    <h2 class="watch-title">监控列表（<span id="count">0</span>）<span class="upd" id="upd"></span></h2>
+    <div id="watch"></div>
+  </aside>
+</main>
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
