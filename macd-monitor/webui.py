@@ -5,6 +5,7 @@ MACD 监控自选管理 Web UI
 搜索股票/指数/ETF(腾讯智能搜索框接口), 管理监控列表并写入 config.json
 用法: python3 webui.py  然后浏览器打开 http://localhost:8688
 """
+import codecs
 import json
 import os
 import re
@@ -56,8 +57,15 @@ def search_suggest(q):
         m = re.search(r'v_hint="([^"]*)"', r.text)
         if not m:
             return []
+        hint = m.group(1)
+        # 接口返回的中文名是 \\uXXXX 转义文本, 需解码为正常中文
+        if "\\u" in hint:
+            try:
+                hint = codecs.decode(hint, "unicode_escape")
+            except Exception:
+                pass
         out, seen = [], set()
-        for item in m.group(1).split("^"):
+        for item in hint.split("^"):
             parts = item.split("~")
             if len(parts) < 5:
                 continue
