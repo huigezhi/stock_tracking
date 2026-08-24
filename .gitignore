@@ -1,0 +1,6 @@
+# 真实配置含飞书密钥, 不入库(复制 config.example.json 后填写)
+macd-monitor/config.json
+# 运行时产物
+macd-monitor/state.json
+macd-monitor/monitor.log
+__pycache__/
