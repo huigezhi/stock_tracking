@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # MACD 监控一键部署脚本 (适用于 Ubuntu/Debian/CentOS 等 Linux VPS)
 # 用法: 在 VPS 上执行
-#   curl -fsSL https://raw.githubusercontent.com/huigezhi/-/main/deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/huigezhi/stock_tracking/main/deploy.sh | bash
 # 或克隆仓库后: bash deploy.sh
 set -euo pipefail
 
 APP_DIR="/opt/macd-monitor"
-REPO_URL="https://github.com/huigezhi/-.git"
+REPO_URL="https://github.com/huigezhi/stock_tracking.git"
 SVC_MONITOR="macd-monitor"
 SVC_WEBUI="macd-webui"
 
