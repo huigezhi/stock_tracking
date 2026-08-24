@@ -250,6 +250,48 @@ def send_feishu(cfg, alerts):
         log.error("飞书推送异常: %s", e)
 
 
+def send_feishu_text(cfg, text):
+    """发送纯文本消息到飞书(用于日志/状态同步)"""
+    url = str(cfg.get("webhook_url", "")).strip()
+    if not url:
+        return
+    payload = {"msg_type": "text", "content": {"text": text}}
+    secret = str(cfg.get("webhook_secret", "")).strip()
+    if secret:
+        ts = str(int(time.time()))
+        payload["timestamp"] = ts
+        payload["sign"] = feishu_sign(secret, ts)
+    try:
+        r = S.post(url, json=payload, timeout=10)
+        res = r.json()
+        if res.get("code") == 0 or res.get("StatusCode") == 0:
+            log.info("飞书文本已推送: %s", text.splitlines()[0][:40])
+        else:
+            log.error("飞书文本推送失败: %s", res)
+    except Exception as e:
+        log.error("飞书文本推送异常: %s", e)
+
+
+class FeishuLogHandler(logging.Handler):
+    """将指定级别以上的日志实时转发到飞书(默认WARNING, 可通过 feishu_log_level 调整)"""
+    _sending = False
+
+    def emit(self, record):
+        if self._sending:
+            return
+        cfg = load_json(CONFIG_PATH, {})
+        if not str(cfg.get("webhook_url", "")).strip():
+            return
+        level = str(cfg.get("feishu_log_level", "WARNING")).upper()
+        if record.levelno < getattr(logging, level, logging.WARNING):
+            return
+        self._sending = True
+        try:
+            send_feishu_text(cfg, f"[MACD监控] {record.levelname} {record.getMessage()}")
+        finally:
+            self._sending = False
+
+
 # ---------------- 扫描逻辑 ----------------
 
 def scan(cfg, state, now):
@@ -371,18 +413,44 @@ def main():
     log.info("启动MACD监控: %d只股票 × %d个周期 %s",
              len(cfg["stocks"]), len(cfg.get("timeframes", [])),
              cfg.get("timeframes"))
+    # 日志实时同步到飞书(WARNING及以上), 心跳状态定时推送
+    log.addHandler(FeishuLogHandler())
+    send_feishu_text(cfg, f"✅ MACD监控已启动\n"
+                          f"标的: {len(cfg['stocks'])}只 × {len(cfg.get('timeframes', []))}周期\n"
+                          f"周期: {'/'.join(cfg.get('timeframes', []))}")
+    start_ts = time.time()
+    last_hb = time.time()
+    last_round = "尚未扫描"
     while True:
         now = now_cst()
         try:
             # 每轮热加载配置, Web UI 增删股票后无需重启即可生效
             cfg = load_json(CONFIG_PATH, cfg)
             if cfg.get("stocks"):
+                t0 = time.time()
                 alerts = scan(cfg, state, now)
                 if alerts:
                     for a in alerts:
                         log.info("信号: %s", fmt_alert_line(a))
                     send_feishu(cfg, alerts)
                 save_json(STATE_PATH, state)
+                last_round = (f"{now_cst():%H:%M:%S} 新信号{len(alerts)}条 "
+                              f"耗时{time.time() - t0:.1f}s")
+                log.info("本轮扫描完成: %s", last_round)
+            # 心跳状态摘要(默认每30分钟, feishu_status_interval_min 可调, 0=关闭)
+            hb_min = cfg.get("feishu_status_interval_min", 30)
+            if hb_min and time.time() - last_hb >= float(hb_min) * 60:
+                last_hb = time.time()
+                mins = int((time.time() - start_ts) // 60)
+                session = ("交易时段(30秒轮询)" if is_trading_time(now_cst())
+                           else "非交易时段(300秒轮询)")
+                send_feishu_text(cfg,
+                                 f"📊 MACD监控状态\n"
+                                 f"时间: {now_cst():%Y-%m-%d %H:%M} (北京时间)\n"
+                                 f"状态: 运行中 (已运行 {mins // 60}小时{mins % 60}分)\n"
+                                 f"标的: {len(cfg.get('stocks', []))}只\n"
+                                 f"最后一轮: {last_round}\n"
+                                 f"当前: {session}")
         except Exception:
             log.exception("扫描异常")
         interval = cfg.get("poll_interval_sec", 30) if is_trading_time(now_cst()) else 300
