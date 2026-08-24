@@ -1,0 +1,38 @@
+{
+  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/6aa8e948-5d81-4b32-985e-8f624de21dd0",
+  "webhook_secret": "etFEzZZwowZRlxiXiZVGge",
+  "poll_interval_sec": 30,
+  "signal_on_forming_bar": false,
+  "feishu_log_level": "WARNING",
+  "feishu_status_interval_min": 30,
+  "timeframes": [
+    "1m",
+    "5m",
+    "30m",
+    "60m",
+    "day",
+    "week"
+  ],
+  "stocks": [
+    {
+      "code": "sh600519",
+      "name": "贵州茅台",
+      "group": "持仓"
+    },
+    {
+      "code": "sz300750",
+      "name": "宁德时代",
+      "group": "持仓"
+    },
+    {
+      "code": "sh601318",
+      "name": "中国平安",
+      "group": "自选"
+    },
+    {
+      "code": "sz002594",
+      "name": "比亚迪",
+      "group": "自选"
+    }
+  ]
+}
