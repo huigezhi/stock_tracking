@@ -374,12 +374,15 @@ def main():
     while True:
         now = now_cst()
         try:
-            alerts = scan(cfg, state, now)
-            if alerts:
-                for a in alerts:
-                    log.info("信号: %s", fmt_alert_line(a))
-                send_feishu(cfg, alerts)
-            save_json(STATE_PATH, state)
+            # 每轮热加载配置, Web UI 增删股票后无需重启即可生效
+            cfg = load_json(CONFIG_PATH, cfg)
+            if cfg.get("stocks"):
+                alerts = scan(cfg, state, now)
+                if alerts:
+                    for a in alerts:
+                        log.info("信号: %s", fmt_alert_line(a))
+                    send_feishu(cfg, alerts)
+                save_json(STATE_PATH, state)
         except Exception:
             log.exception("扫描异常")
         interval = cfg.get("poll_interval_sec", 30) if is_trading_time(now_cst()) else 300
