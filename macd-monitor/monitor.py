@@ -205,6 +205,12 @@ def send_feishu(cfg, alerts):
         for a in alerts:
             log.info("[未配置webhook,仅控制台] %s", fmt_alert_line(a))
         return
+    # 飞书卡片上限100KB, 分批发送(每批20条)防止超限
+    for i in range(0, len(alerts), 20):
+        send_feishu_card(cfg, alerts[i:i + 20])
+
+
+def send_feishu_card(cfg, alerts):
     kinds = {a["cross"] for a in alerts}
     if kinds == {"golden"}:
         template, word = "green", "金叉"
@@ -296,15 +302,20 @@ class FeishuLogHandler(logging.Handler):
 
 def scan(cfg, state, now):
     """扫描全部股票/周期, 返回新信号列表。
-    首次运行(未prime)只记录历史信号、仅提醒最新一根完成K线上的交叉;
+    新增股票(未prime)只记录历史信号、仅提醒最新一根完成K线上的交叉;
     之后运行可完整补漏停机期间错过的信号(去重键保证不重复提醒)。"""
-    first_run = not state.get("primed")
-    alerts = []
     signals = state["signals"]
+    # 按股票记录初始化状态, 避免新增股票时历史信号洪泛
+    if "primed_stocks" not in state:
+        # 从旧状态迁移: 已有历史信号的股票视为已初始化
+        state["primed_stocks"] = sorted({k.split("|")[0] for k in signals})
+    primed_stocks = state["primed_stocks"]
+    alerts = []
     for stock in cfg.get("stocks", []):
         code = norm_code(stock["code"])
         name = stock.get("name", code)
         group = stock.get("group", "自选")
+        stock_new = code not in primed_stocks
         for tf in cfg.get("timeframes", []):
             bars = fetch_klines(code, tf, MIN_COUNT if tf in TF_MIN else DAYW_COUNT)
             if len(bars) < MIN_BARS:
@@ -324,14 +335,16 @@ def scan(cfg, state, now):
                 if key in signals:
                     continue
                 signals[key] = cross
-                if first_run and i != last_completed:
-                    continue  # 首次运行: 历史信号只入库不提醒
+                if stock_new and i != last_completed:
+                    continue  # 新增股票: 历史信号只入库不提醒
                 alerts.append({
                     "code": code, "name": name, "group": group, "tf": tf,
                     "cross": cross, "label": bars[i][0], "close": closes[i],
                     "dif": dif[i], "dea": dea[i], "forming": i > last_completed,
                 })
             time.sleep(0.1)
+        if code not in primed_stocks:
+            primed_stocks.append(code)
     # 状态瘦身
     while len(signals) > STATE_LIMIT:
         signals.pop(next(iter(signals)))
