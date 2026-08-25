@@ -93,9 +93,10 @@ def fetch_klines(code, tf, count):
         if tf in TF_MIN:
             url = ("https://ifzq.gtimg.cn/appstock/app/kline/mkline"
                    f"?param={code},m{TF_MIN[tf]},,{count}")
-            key = f"m{TF_MIN[tf]}"
             r = S.get(url, timeout=10)
-            data = r.json()["data"][code]
+            # 分钟线接口的key是 m1/m5/m30/m60 (修复: 之前误用 "1m" 查不到数据)
+            rows = r.json()["data"][code].get(f"m{TF_MIN[tf]}") or []
+            return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
         else:
             url = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get"
                    f"?param={code},{tf},,,{count},qfq")
@@ -309,6 +310,9 @@ def scan(cfg, state, now):
     if "primed_stocks" not in state:
         # 从旧状态迁移: 已有历史信号的股票视为已初始化
         state["primed_stocks"] = sorted({k.split("|")[0] for k in signals})
+    # 旧版本分钟线取数有bug导致state中无任何分钟信号, 升级后首次运行
+    # 将全部历史分钟信号静默入库, 避免一次性洪泛推送
+    minute_primed = bool(state.get("minute_primed"))
     primed_stocks = state["primed_stocks"]
     alerts = []
     for stock in cfg.get("stocks", []):
@@ -317,6 +321,7 @@ def scan(cfg, state, now):
         group = stock.get("group", "自选")
         stock_new = code not in primed_stocks
         for tf in cfg.get("timeframes", []):
+            tf_new = tf in TF_MIN and not minute_primed
             bars = fetch_klines(code, tf, MIN_COUNT if tf in TF_MIN else DAYW_COUNT)
             if len(bars) < MIN_BARS:
                 continue
@@ -335,8 +340,8 @@ def scan(cfg, state, now):
                 if key in signals:
                     continue
                 signals[key] = cross
-                if stock_new and i != last_completed:
-                    continue  # 新增股票: 历史信号只入库不提醒
+                if (stock_new or tf_new) and i != last_completed:
+                    continue  # 新增股票/分钟信号迁移: 历史信号只入库不提醒
                 alerts.append({
                     "code": code, "name": name, "group": group, "tf": tf,
                     "cross": cross, "label": bars[i][0], "close": closes[i],
@@ -349,6 +354,7 @@ def scan(cfg, state, now):
     while len(signals) > STATE_LIMIT:
         signals.pop(next(iter(signals)))
     state["primed"] = True
+    state["minute_primed"] = True
     return alerts
 
 
@@ -430,12 +436,14 @@ def main():
     log.addHandler(FeishuLogHandler())
     send_feishu_text(cfg, f"✅ MACD监控已启动\n"
                           f"标的: {len(cfg['stocks'])}只 × {len(cfg.get('timeframes', []))}周期\n"
-                          f"周期: {'/'.join(cfg.get('timeframes', []))}")
+                          f"周期: {'/'.join(cfg.get('timeframes', []))}\n"
+                          f"通知策略: 交易时段即时推送信号; 非交易时段/非交易日静默")
     start_ts = time.time()
     last_hb = time.time()
     last_round = "尚未扫描"
     while True:
         now = now_cst()
+        trading = is_trading_time(now)
         try:
             # 每轮热加载配置, Web UI 增删股票后无需重启即可生效
             cfg = load_json(CONFIG_PATH, cfg)
@@ -445,25 +453,29 @@ def main():
                 if alerts:
                     for a in alerts:
                         log.info("信号: %s", fmt_alert_line(a))
-                    send_feishu(cfg, alerts)
+                    if trading:
+                        # 交易时段: 即时推送
+                        send_feishu(cfg, alerts)
+                    else:
+                        # 非交易时段/非交易日: 信号仅入库记录, 不推送
+                        log.info("非交易时段, %d条信号仅记录不推送", len(alerts))
                 save_json(STATE_PATH, state)
                 last_round = (f"{now_cst():%H:%M:%S} 新信号{len(alerts)}条 "
                               f"耗时{time.time() - t0:.1f}s")
                 log.info("本轮扫描完成: %s", last_round)
             # 心跳状态摘要(默认每30分钟, feishu_status_interval_min 可调, 0=关闭)
+            # 仅交易时段推送心跳; 非交易时段/非交易日完全静默
             hb_min = cfg.get("feishu_status_interval_min", 30)
-            if hb_min and time.time() - last_hb >= float(hb_min) * 60:
+            if hb_min and trading and time.time() - last_hb >= float(hb_min) * 60:
                 last_hb = time.time()
                 mins = int((time.time() - start_ts) // 60)
-                session = ("交易时段(30秒轮询)" if is_trading_time(now_cst())
-                           else "非交易时段(300秒轮询)")
                 send_feishu_text(cfg,
                                  f"📊 MACD监控状态\n"
                                  f"时间: {now_cst():%Y-%m-%d %H:%M} (北京时间)\n"
                                  f"状态: 运行中 (已运行 {mins // 60}小时{mins % 60}分)\n"
                                  f"标的: {len(cfg.get('stocks', []))}只\n"
                                  f"最后一轮: {last_round}\n"
-                                 f"当前: {session}")
+                                 f"当前: 交易时段({cfg.get('poll_interval_sec', 30)}秒轮询)")
         except Exception:
             log.exception("扫描异常")
         interval = cfg.get("poll_interval_sec", 30) if is_trading_time(now_cst()) else 300
