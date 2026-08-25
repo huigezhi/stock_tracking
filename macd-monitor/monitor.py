@@ -475,10 +475,10 @@ def main():
                                  f"状态: 运行中 (已运行 {mins // 60}小时{mins % 60}分)\n"
                                  f"标的: {len(cfg.get('stocks', []))}只\n"
                                  f"最后一轮: {last_round}\n"
-                                 f"当前: 交易时段({cfg.get('poll_interval_sec', 30)}秒轮询)")
+                                 f"当前: 交易时段({cfg.get('poll_interval_sec', 15)}秒轮询)")
         except Exception:
             log.exception("扫描异常")
-        interval = cfg.get("poll_interval_sec", 30) if is_trading_time(now_cst()) else 300
+        interval = cfg.get("poll_interval_sec", 15) if is_trading_time(now_cst()) else 300
         time.sleep(interval)
 
 
