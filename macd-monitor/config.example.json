@@ -1,7 +1,7 @@
 {
   "webhook_url": "",
   "webhook_secret": "",
-  "poll_interval_sec": 15,
+  "poll_interval_sec": 30,
   "signal_on_forming_bar": false,
   "feishu_log_level": "WARNING",
   "feishu_status_interval_min": 30,
