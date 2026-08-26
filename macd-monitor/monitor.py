@@ -86,34 +86,58 @@ def is_trading_time(now):
 
 # ---------------- 行情数据 ----------------
 
-def fetch_klines(code, tf, count):
-    """返回 [(label, close), ...] 时间升序。
-    分钟线 label='202608241500'(K线结束时刻), 日/周线 label='2026-08-24'"""
-    try:
-        if tf in TF_MIN:
-            url = ("https://ifzq.gtimg.cn/appstock/app/kline/mkline"
-                   f"?param={code},m{TF_MIN[tf]},,{count}")
-            r = S.get(url, timeout=10)
-            # 分钟线接口的key是 m1/m5/m30/m60 (修复: 之前误用 "1m" 查不到数据)
-            rows = r.json()["data"][code].get(f"m{TF_MIN[tf]}") or []
-            return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
-        else:
-            url = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get"
-                   f"?param={code},{tf},,,{count},qfq")
-            r = S.get(url, timeout=10)
-            try:
-                data = r.json()["data"][code]
-            except Exception:
-                # fqkline 被WAF拦截(501页面)时回退到非复权接口
-                url = ("https://ifzq.gtimg.cn/appstock/app/kline/kline"
-                       f"?param={code},{tf},,,{count}")
-                r = S.get(url, timeout=10)
-                data = r.json()["data"][code]
-        rows = data.get(tf) or data.get("qfq" + tf) or []
+_fail_streak = {}  # (code, tf) -> 连续失败轮数, 用于区分偶发超时与持续故障
+
+
+def _klines_once(code, tf, count):
+    """单次请求K线, 失败抛异常"""
+    if tf in TF_MIN:
+        url = ("https://ifzq.gtimg.cn/appstock/app/kline/mkline"
+               f"?param={code},m{TF_MIN[tf]},,{count}")
+        r = S.get(url, timeout=8)
+        # 分钟线接口的key是 m1/m5/m30/m60 (修复: 之前误用 "1m" 查不到数据)
+        rows = r.json()["data"][code].get(f"m{TF_MIN[tf]}") or []
         return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
-    except Exception as e:
-        log.warning("获取K线失败 %s %s: %s", code, tf, e)
-        return []
+    url = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get"
+           f"?param={code},{tf},,,{count},qfq")
+    r = S.get(url, timeout=8)
+    try:
+        data = r.json()["data"][code]
+    except Exception:
+        # fqkline 被WAF拦截(501页面)时回退到非复权接口
+        url = ("https://ifzq.gtimg.cn/appstock/app/kline/kline"
+               f"?param={code},{tf},,,{count}")
+        r = S.get(url, timeout=8)
+        data = r.json()["data"][code]
+    rows = data.get(tf) or data.get("qfq" + tf) or []
+    return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
+
+
+def fetch_klines(code, tf, count, retries=2):
+    """返回 [(label, close), ...] 时间升序, 带重试。
+    分钟线 label='202608241500'(K线结束时刻), 日/周线 label='2026-08-24'
+    偶发超时只记INFO(不推飞书), 连续多轮失败才升级WARNING推送告警"""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            rows = _klines_once(code, tf, count)
+            prev = _fail_streak.pop((code, tf), 0)
+            if prev >= 4:
+                log.info("K线接口已恢复: %s %s (此前连续失败%d轮)", code, tf, prev)
+            return rows
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(1 + attempt)  # 退避1s/2s后重试
+    streak = _fail_streak.get((code, tf), 0) + 1
+    _fail_streak[(code, tf)] = streak
+    if streak >= 4:
+        log.warning("获取K线失败 %s %s (已连续%d轮, 请检查网络/接口): %s",
+                    code, tf, streak, last_err)
+    else:
+        log.info("获取K线临时失败 %s %s (第%d轮, 下轮自动重试): %s",
+                 code, tf, streak, last_err)
+    return []
 
 
 # ---------------- MACD ----------------
