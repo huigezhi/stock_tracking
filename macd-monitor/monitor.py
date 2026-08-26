@@ -326,27 +326,32 @@ class FeishuLogHandler(logging.Handler):
 
 # ---------------- 扫描逻辑 ----------------
 
+def is_fresh_signal(tf, label, now):
+    """信号是否值得即时推送: 只推刚完成不久的信号。
+    分钟线: K线收盘距今不超过3个周期(1m→3分钟, 5m→15分钟, 30m→90分钟, 60m→3小时);
+    日线: 当天; 周线: 本周。
+    停机/重启期间错过的历史信号只入库去重、不推送(历史信号无即时意义)。"""
+    if tf in TF_MIN:
+        age = (now - minute_dt(label)).total_seconds()
+        return -60 <= age <= TF_MIN[tf] * 180
+    d = datetime.strptime(label, "%Y-%m-%d").date()
+    if tf == "day":
+        return d == now.date()
+    return week_id(d) == week_id(now.date())
+
+
 def scan(cfg, state, now):
-    """扫描全部股票/周期, 返回新信号列表。
-    新增股票(未prime)只记录历史信号、仅提醒最新一根完成K线上的交叉;
-    之后运行可完整补漏停机期间错过的信号(去重键保证不重复提醒)。"""
+    """扫描全部股票/周期, 返回值得推送的新信号列表。
+    全部交叉信号入库去重; 但只推送"新鲜"信号(刚完成不久), 历史信号静默入库。"""
     signals = state["signals"]
-    # 按股票记录初始化状态, 避免新增股票时历史信号洪泛
-    if "primed_stocks" not in state:
-        # 从旧状态迁移: 已有历史信号的股票视为已初始化
-        state["primed_stocks"] = sorted({k.split("|")[0] for k in signals})
-    # 旧版本分钟线取数有bug导致state中无任何分钟信号, 升级后首次运行
-    # 将全部历史分钟信号静默入库, 避免一次性洪泛推送
-    minute_primed = bool(state.get("minute_primed"))
-    primed_stocks = state["primed_stocks"]
+    primed_stocks = state.setdefault("primed_stocks", [])
     alerts = []
+    skipped = 0  # 入库但不推送的历史信号数
     for stock in cfg.get("stocks", []):
         code = norm_code(stock["code"])
         name = stock.get("name", code)
         group = stock.get("group", "自选")
-        stock_new = code not in primed_stocks
         for tf in cfg.get("timeframes", []):
-            tf_new = tf in TF_MIN and not minute_primed
             bars = fetch_klines(code, tf, MIN_COUNT if tf in TF_MIN else DAYW_COUNT)
             if len(bars) < MIN_BARS:
                 continue
@@ -365,8 +370,9 @@ def scan(cfg, state, now):
                 if key in signals:
                     continue
                 signals[key] = cross
-                if (stock_new or tf_new) and i != last_completed:
-                    continue  # 新增股票/分钟信号迁移: 历史信号只入库不提醒
+                if not is_fresh_signal(tf, bars[i][0], now):
+                    skipped += 1  # 历史信号: 只入库去重, 不推送
+                    continue
                 alerts.append({
                     "code": code, "name": name, "group": group, "tf": tf,
                     "cross": cross, "label": bars[i][0], "close": closes[i],
@@ -375,6 +381,8 @@ def scan(cfg, state, now):
             time.sleep(0.1)
         if code not in primed_stocks:
             primed_stocks.append(code)
+    if skipped:
+        log.info("历史信号%d条已入库(不推送, 仅去重)", skipped)
     # 状态瘦身
     while len(signals) > STATE_LIMIT:
         signals.pop(next(iter(signals)))
