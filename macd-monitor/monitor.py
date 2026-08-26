@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MACD 金叉/死叉监控 + 飞书机器人提醒
+MACD 金叉/死叉 + 底背离/顶背离 监控 + 飞书机器人提醒
 数据源: 腾讯行情 (ifzq.gtimg.cn)  K线: 1m/5m/30m/60m/日线/周线
 用法:
   python3 monitor.py --report   # 查看各周期 MACD 状态与近期信号(不发通知、不写状态)
@@ -171,6 +171,55 @@ def detect_cross(dif, dea, i):
     return None
 
 
+# ---------------- 背离检测 ----------------
+PIVOT_WIN = 4        # DIF极值确认窗口: 前后各4根已收盘K线
+DIV_MIN_GAP = 5      # 参与比较的两个极值间的最少K线数
+DIV_MAX_GAP = 120    # 两个极值间最多K线数(超过视为不同波段, 不构成一对)
+
+
+def find_dif_pivots(dif, upto, k=PIVOT_WIN):
+    """已确认的DIF局部极值: bar i 前后各k根DIF都比它大(低点)或都小(高点),
+    只扫描索引 <= upto 的已收盘K线。返回 (低点索引列表, 高点索引列表), 升序"""
+    lows, highs = [], []
+    for i in range(k, upto - k + 1):
+        seg = dif[i - k:i + k + 1]
+        v = dif[i]
+        if seg.count(v) != 1:      # 并列极值(平台)不取, 避免歧义
+            continue
+        if v == min(seg):
+            lows.append(i)
+        elif v == max(seg):
+            highs.append(i)
+    return lows, highs
+
+
+def detect_divergences(bars, dif, last_completed, pairs=1):
+    """在最近 pairs 对相邻DIF极值中检测背离(只用已收盘K线):
+      底背离 bull: 价格创新低 + DIF低点抬高(两个低点均在零轴下方)
+      顶背离 bear: 价格创新高 + DIF高点降低(两个高点均在零轴上方)
+    返回 [{div,p1,p2,c1,c2,d1,d2,confirm}, ...]; confirm=第二个极值确认bar索引,
+    信号在 confirm 收盘后成立, 新鲜度判断与金叉/死叉一致(is_fresh_signal)"""
+    if last_completed < 2 * PIVOT_WIN + DIV_MIN_GAP:
+        return []
+    closes = [c for _, c in bars]
+    lows, highs = find_dif_pivots(dif, last_completed)
+    out = []
+    for pivots, kind in ((lows, "bull"), (highs, "bear")):
+        for p1, p2 in zip(pivots[-pairs - 1:-1], pivots[-pairs:]):
+            if not (DIV_MIN_GAP <= p2 - p1 <= DIV_MAX_GAP):
+                continue
+            c1, c2, d1, d2 = closes[p1], closes[p2], dif[p1], dif[p2]
+            if kind == "bull":
+                ok = d1 < 0 and d2 < 0 and c2 < c1 and d2 > d1
+            else:
+                ok = d1 > 0 and d2 > 0 and c2 > c1 and d2 < d1
+            if ok:
+                out.append({"div": kind, "p1": p1, "p2": p2,
+                            "c1": c1, "c2": c2, "d1": d1, "d2": d2,
+                            "confirm": p2 + PIVOT_WIN})
+    return out
+
+
 # ---------------- K线完成判断 ----------------
 
 def minute_dt(label):
@@ -216,7 +265,30 @@ def feishu_sign(secret, ts):
     return base64.b64encode(hmac.new(s.encode("utf-8"), digestmod=hashlib.sha256).digest()).decode()
 
 
+def sig_word(a):
+    """信号中文名"""
+    if a.get("kind") == "div":
+        return "底背离" if a["div"] == "bull" else "顶背离"
+    return "金叉" if a["cross"] == "golden" else "死叉"
+
+
+def sig_dir(a):
+    """信号方向: bull 看涨 / bear 看跌"""
+    if a.get("kind") == "div":
+        return a["div"]
+    return "bull" if a["cross"] == "golden" else "bear"
+
+
 def fmt_alert_line(a):
+    if a.get("kind") == "div":
+        bull = a["div"] == "bull"
+        w = "底背离" if bull else "顶背离"
+        if bull:
+            shape = f'价格{a["c1"]:.2f}→{a["c2"]:.2f}创新低 DIF{a["d1"]:.3f}→{a["d2"]:.3f}抬高'
+        else:
+            shape = f'价格{a["c1"]:.2f}→{a["c2"]:.2f}创新高 DIF{a["d1"]:.3f}→{a["d2"]:.3f}降低'
+        return (f'{a["name"]}({a["code"]})[{a["group"]}] {TF_NAME[a["tf"]]} {w} '
+                f'{shape} @{fmt_label(a["tf"], a["label"])}')
     w = "金叉" if a["cross"] == "golden" else "死叉"
     flag = " (未收盘确认)" if a.get("forming") else ""
     return (f'{a["name"]}({a["code"]})[{a["group"]}] {TF_NAME[a["tf"]]} {w} '
@@ -237,15 +309,29 @@ def send_feishu(cfg, alerts):
 
 def send_feishu_card(cfg, alerts):
     url = str(cfg.get("webhook_url", "")).strip()
-    kinds = {a["cross"] for a in alerts}
-    if kinds == {"golden"}:
-        template, word = "green", "金叉"
-    elif kinds == {"death"}:
-        template, word = "red", "死叉"
-    else:
-        template, word = "blue", "交叉"
+    # 卡片颜色按方向: 全部看涨绿/全部看跌红/混合蓝; 标题取统一信号类型
+    dirs = {sig_dir(a) for a in alerts}
+    template = "green" if dirs == {"bull"} else ("red" if dirs == {"bear"} else "blue")
+    words = {sig_word(a) for a in alerts}
+    word = words.pop() if len(words) == 1 else "信号"
     elements = []
     for a in alerts:
+        if a.get("kind") == "div":
+            bull = a["div"] == "bull"
+            emoji = "🟢" if bull else "🔴"
+            w = "底背离" if bull else "顶背离"
+            tagA, tagB = ("低点A", "低点B") if bull else ("高点A", "高点B")
+            trend = "价格创新低，DIF低点抬高" if bull else "价格创新高，DIF高点降低"
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content":
+                         f'{emoji} **{w}**　**{a["name"]}**（{a["code"]}）[{a["group"]}]\n'
+                         f'周期：{TF_NAME[a["tf"]]}　现价：{a["close"]:.2f}\n'
+                         f'{tagA} {fmt_label(a["tf"], a["p1"])}　价格 {a["c1"]:.2f}　DIF {a["d1"]:.3f}\n'
+                         f'{tagB} {fmt_label(a["tf"], a["p2"])}　价格 {a["c2"]:.2f}　DIF {a["d2"]:.3f}\n'
+                         f'{trend}　确认 @{fmt_label(a["tf"], a["label"])}'},
+            })
+            continue
         emoji = "🟢" if a["cross"] == "golden" else "🔴"
         w = "金叉" if a["cross"] == "golden" else "死叉"
         extra = "　⚠️未收盘确认" if a.get("forming") else ""
@@ -374,9 +460,30 @@ def scan(cfg, state, now):
                     skipped += 1  # 历史信号: 只入库去重, 不推送
                     continue
                 alerts.append({
+                    "kind": "cross",
                     "code": code, "name": name, "group": group, "tf": tf,
                     "cross": cross, "label": bars[i][0], "close": closes[i],
                     "dif": dif[i], "dea": dea[i], "forming": i > last_completed,
+                })
+            # ---- 背离检测(只用已收盘K线; 每对DIF极值只报一次) ----
+            for dv in detect_divergences(bars, dif, last_completed):
+                key = (f"{code}|{tf}|div|{period_id(tf, bars[dv['p1']][0])}"
+                       f"|{period_id(tf, bars[dv['p2']][0])}")
+                if key in signals:
+                    continue
+                signals[key] = dv["div"]
+                label = bars[dv["confirm"]][0]  # 第二个极值被确认的K线 = 信号成立时刻
+                if not is_fresh_signal(tf, label, now):
+                    skipped += 1  # 历史背离: 只入库去重, 不推送
+                    continue
+                alerts.append({
+                    "kind": "div", "div": dv["div"],
+                    "code": code, "name": name, "group": group, "tf": tf,
+                    "label": label, "close": closes[dv["confirm"]],
+                    "dif": dif[dv["confirm"]], "dea": dea[dv["confirm"]],
+                    "forming": False,
+                    "p1": bars[dv["p1"]][0], "p2": bars[dv["p2"]][0],
+                    "c1": dv["c1"], "c2": dv["c2"], "d1": dv["d1"], "d2": dv["d2"],
                 })
             time.sleep(0.1)
         if code not in primed_stocks:
@@ -426,6 +533,11 @@ def report(cfg):
                 c, lb, ago = recent
                 w = "🟢金叉" if c == "golden" else "🔴死叉"
                 print(f"  　　　└ 最近信号: {w} @ {fmt_label(tf, lb)} ({ago}根K线前)")
+            for dv in detect_divergences(bars, dif, last_completed, pairs=2):
+                w = "🟢底背离" if dv["div"] == "bull" else "🔴顶背离"
+                print(f"  　　　└ 最近背离: {w} {fmt_label(tf, bars[dv['p1']][0])} → "
+                      f"{fmt_label(tf, bars[dv['p2']][0])}　"
+                      f"价格 {dv['c1']:.2f}→{dv['c2']:.2f}　DIF {dv['d1']:.3f}→{dv['d2']:.3f}")
             time.sleep(0.1)
     print("\n(柱=DIF-DEA的2倍; 距离0越近越接近交叉)")
 
@@ -433,7 +545,7 @@ def report(cfg):
 # ---------------- 主流程 ----------------
 
 def main():
-    ap = argparse.ArgumentParser(description="MACD金叉/死叉监控 + 飞书提醒")
+    ap = argparse.ArgumentParser(description="MACD金叉/死叉/背离监控 + 飞书提醒")
     ap.add_argument("--report", action="store_true", help="查看MACD状态报告, 不发通知")
     ap.add_argument("--once", action="store_true", help="扫描一轮后退出(测试用)")
     args = ap.parse_args()
@@ -469,6 +581,7 @@ def main():
     log.addHandler(FeishuLogHandler())
     send_feishu_text(cfg, f"✅ MACD监控已启动\n"
                           f"标的: {len(cfg['stocks'])}只 × {len(cfg.get('timeframes', []))}周期\n"
+                          f"信号: 金叉/死叉 + 底背离/顶背离\n"
                           f"周期: {'/'.join(cfg.get('timeframes', []))}\n"
                           f"通知策略: 交易时段即时推送信号; 非交易时段/非交易日静默")
     start_ts = time.time()
