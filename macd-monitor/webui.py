@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -51,6 +52,17 @@ BROAD_ETF_CANDIDATES = {
 MIN_SHARES = 100  # 亿份
 
 CFG_LOCK = threading.Lock()
+SHARE_HIST_PATH = os.path.join(BASE, "etf_share_hist.json")
+SHARE_LOCK = threading.Lock()
+SNAP_KEEP_DAYS = 500   # 每只ETF保留的日度份额快照数
+
+
+def load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
 def load_cfg():
@@ -182,6 +194,32 @@ def build_quotes(stocks):
 _ETF_CACHE = {"ts": 0, "data": []}
 
 
+def record_share_snapshots(etf_list):
+    """将当日份额快照写入 etf_share_hist.json (每日一条, 盘中覆盖为最新值),
+    随运行时间自然积累日度份额序列, 用于面板展示每日/每周份额变动"""
+    today = time.strftime("%Y-%m-%d")
+    with SHARE_LOCK:
+        hist = load_json(SHARE_HIST_PATH, {})
+        changed = False
+        for e in etf_list:
+            code, shares = e.get("code"), e.get("shares")
+            if not code or not shares:
+                continue
+            days = hist.setdefault(code, {})
+            if days.get(today) != shares:
+                days[today] = shares
+                changed = True
+            if len(days) > SNAP_KEEP_DAYS:  # 只保留最近N天
+                for k in sorted(days)[:-SNAP_KEEP_DAYS]:
+                    days.pop(k, None)
+                    changed = True
+        if changed:
+            tmp = SHARE_HIST_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(hist, f, ensure_ascii=False)
+            os.replace(tmp, SHARE_HIST_PATH)
+
+
 def broad_etf_list():
     """宽基ETF列表: 候选清单中份额>=100亿份的, 缓存10分钟"""
     now = time.time()
@@ -202,6 +240,7 @@ def broad_etf_list():
     out.sort(key=lambda x: -x["shares"])
     if out:
         _ETF_CACHE["ts"], _ETF_CACHE["data"] = now, out
+        record_share_snapshots(out)
     return out
 
 
@@ -222,6 +261,27 @@ def fetch_kline(code, tf="day", n=800):
         except Exception:
             continue
     return []
+
+
+def get_etf_share_history(code, tf="day"):
+    """ETF份额历史(亿份): [[date, shares], ...]; tf=week 时按ISO周聚合, 取每周最后快照"""
+    with SHARE_LOCK:
+        hist = load_json(SHARE_HIST_PATH, {})
+    days = hist.get(code, {})
+    if not days:
+        return []
+    items = sorted(days.items())  # [(date, shares), ...]
+    if tf != "week":
+        return [[d, s] for d, s in items]
+    out, cur_key = [], None
+    for d, s in items:
+        key = datetime.strptime(d, "%Y-%m-%d").isocalendar()[:2]
+        if key != cur_key:
+            out.append([d, s])
+            cur_key = key
+        else:
+            out[-1] = [d, s]  # 同周取最后快照
+    return out
 
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -275,6 +335,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(search_suggest(q))
         elif u.path == "/api/etf/list":
             self._json(broad_etf_list())
+        elif u.path == "/api/etf/share":
+            q = parse_qs(u.query)
+            code = q.get("code", [""])[0]
+            tf = q.get("tf", ["day"])[0]
+            self._json(get_etf_share_history(code, tf))
         elif u.path == "/api/kline":
             q = parse_qs(u.query)
             code = q.get("code", [""])[0]

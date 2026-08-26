@@ -35,6 +35,7 @@ function applyTheme(mode) {
     (mode === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.body.classList.toggle('dark', dark);
   if (window.__kchartReady) KChart.draw();  // KChart 定义前(初始化阶段)不绘制
+  if (window.__kchartReady && window.ShareChart) ShareChart.draw();
 }
 function setTheme(mode) {
   localStorage.setItem('theme', mode);
@@ -98,6 +99,7 @@ function selectEtf(code) {
     document.getElementById('chShares').textContent = e.shares + '亿份';
   }
   KChart.load(code, curTf);
+  ShareChart.load(code, curTf);
 }
 
 /* ================= K线图 ================= */
@@ -106,7 +108,10 @@ function switchTf(tf) {
   curTf = tf;
   document.querySelectorAll('.tf').forEach(b =>
     b.classList.toggle('active', b.dataset.tf === tf));
-  if (curEtf) KChart.load(curEtf, tf);
+  if (curEtf) {
+    KChart.load(curEtf, tf);
+    ShareChart.load(curEtf, tf);
+  }
 }
 
 const KChart = {
@@ -132,6 +137,7 @@ const KChart = {
     this.win = {start: Math.max(0, n - 120), end: n - 1};
     this.syncSlider();
     this.draw();
+    ShareChart.draw();  // K线就绪后重绘(份额面板需引用收盘价)
   },
 
   calcMa() {
@@ -390,6 +396,196 @@ const KChart = {
   }
 };
 
+/* ================= 价格/份额变动面板 ================= */
+function weekKey(dateStr) {
+  // 返回所在周的周一日期字符串, 用于周线数据对齐
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+         '-' + String(d.getDate()).padStart(2, '0');
+}
+
+const ShareChart = {
+  data: [],        // [[date, shares(亿份)], ...]
+  code: '', tf: 'day',
+  hover: null,     // 鼠标所在柱索引
+  PRICE_COLOR: '#4a90e2',
+
+  async load(code, tf) {
+    this.code = code; this.tf = tf;
+    this.data = []; this.hover = null; this.draw();
+    try {
+      const r = await fetch(`/api/etf/share?code=${code}&tf=${tf}`);
+      this.data = await r.json();
+    } catch (e) { /* 保持空 */ }
+    if (this.code !== code || this.tf !== tf) return;  // 已切换
+    this.draw();
+  },
+
+  /* 从K线数据查收盘价: 日线按日期匹配, 周线按所在周匹配 */
+  priceAt(date) {
+    const kd = KChart.data;
+    if (!kd.length) return null;
+    if (this.tf === 'week') {
+      const key = weekKey(date);
+      for (let i = kd.length - 1; i >= 0; i--) {
+        if (weekKey(kd[i][0]) === key) return kd[i][2];
+      }
+      return null;
+    }
+    for (let i = kd.length - 1; i >= 0; i--) {
+      if (kd[i][0] === date) return kd[i][2];
+    }
+    return null;
+  },
+
+  css(name) {
+    return getComputedStyle(document.body).getPropertyValue(name).trim();
+  },
+
+  draw() {
+    const cv = document.getElementById('shareChart');
+    const body = document.getElementById('shareBody');
+    if (!cv || !body) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = body.clientWidth, H = body.clientHeight;
+    if (cv.width !== W * dpr || cv.height !== H * dpr) {
+      cv.width = W * dpr; cv.height = H * dpr;
+    }
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const C = {
+      up: this.css('--up') || '#d03a2f', down: this.css('--down') || '#0a8a4a',
+      grid: this.css('--grid'), axis: this.css('--axis'),
+    };
+    const tip = document.getElementById('shareTip');
+    const n = this.data.length;
+    if (n < 2) {
+      tip.textContent = '';
+      ctx.fillStyle = C.axis; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(n === 1 ? '份额数据积累中（每日自动记录，当前 1 天）'
+                           : '暂无份额数据，将随系统运行每日自动记录', W / 2, H / 2);
+      return;
+    }
+    // 变动序列: bar i 对应 data[i+1] 相对 data[i] 的份额增减
+    const dates = [], chgs = [], prices = [];
+    for (let i = 1; i < n; i++) {
+      dates.push(this.data[i][0]);
+      chgs.push(this.data[i][1] - this.data[i - 1][1]);
+      prices.push(this.priceAt(this.data[i][0]));
+    }
+    const m = dates.length;
+    const PAD_L = 48, PAD_R = 44, PAD_T = 8, PAD_B = 18;
+    const plotW = W - PAD_L - PAD_R, plotH = H - PAD_T - PAD_B;
+    // 右轴: 份额增减, 关于0对称
+    let cMax = 0;
+    chgs.forEach(v => cMax = Math.max(cMax, Math.abs(v)));
+    cMax = (cMax || 1) * 1.15;
+    // 左轴: 价格
+    let pMin = Infinity, pMax = -Infinity;
+    prices.forEach(v => {
+      if (v != null) { pMin = Math.min(pMin, v); pMax = Math.max(pMax, v); }
+    });
+    if (pMin === Infinity) { pMin = 0; pMax = 1; }
+    const pPad = (pMax - pMin) * 0.08 || pMax * 0.01 || 1;
+    pMin -= pPad; pMax += pPad;
+    const yC = v => PAD_T + (1 - (v + cMax) / (2 * cMax)) * plotH;
+    const yP = v => PAD_T + (1 - (v - pMin) / (pMax - pMin)) * plotH;
+    const cw = plotW / m;
+    const xC = i => PAD_L + i * cw + cw / 2;
+
+    // ---- 网格与坐标 ----
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    for (let g = 0; g <= 2; g++) {
+      const v = pMax - (pMax - pMin) * g / 2;
+      const y = yP(v);
+      ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+      ctx.fillStyle = this.PRICE_COLOR;
+      ctx.fillText(v >= 100 ? v.toFixed(1) : v.toFixed(3), PAD_L - 4, y + 3);
+    }
+    ctx.fillStyle = C.axis; ctx.textAlign = 'left';
+    ctx.fillText('+' + cMax.toFixed(0), W - PAD_R + 4, yC(cMax) + 3);
+    ctx.fillText('0', W - PAD_R + 4, yC(0) + 3);
+    ctx.fillText('-' + cMax.toFixed(0), W - PAD_R + 4, yC(-cMax) + 3);
+    // 日期刻度(约6个)
+    ctx.textAlign = 'center';
+    const step = Math.max(1, Math.floor(m / 6));
+    for (let i = 0; i < m; i += step) {
+      ctx.fillStyle = C.axis;
+      ctx.fillText(dates[i].slice(2).replace(/-/g, '/'), xC(i), H - 5);
+    }
+
+    // ---- 份额增减柱 ----
+    const bw = Math.max(1, Math.min(cw * 0.7, 13));
+    const zero = yC(0);
+    chgs.forEach((v, i) => {
+      const y = yC(v);
+      ctx.fillStyle = v >= 0 ? C.up : C.down;
+      ctx.globalAlpha = 0.75;
+      ctx.fillRect(xC(i) - bw / 2, Math.min(y, zero), bw, Math.max(Math.abs(y - zero), 1));
+      ctx.globalAlpha = 1;
+    });
+
+    // ---- 价格折线(左轴) ----
+    ctx.strokeStyle = this.PRICE_COLOR; ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    let started = false;
+    prices.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      const x = xC(i), y = yP(v);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // ---- 十字光标 ----
+    if (this.hover != null && this.hover >= 0 && this.hover < m) {
+      const x = xC(this.hover);
+      ctx.strokeStyle = C.axis; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, H - PAD_B); ctx.stroke();
+      ctx.setLineDash([]);
+      this.showTip(this.hover);
+    } else {
+      this.showTip(m - 1);  // 默认显示最后一根
+    }
+  },
+
+  showTip(i) {
+    const cur = this.data[i + 1], prev = this.data[i];
+    if (!cur || !prev) return;
+    const chg = cur[1] - prev[1];
+    const price = this.priceAt(cur[0]);
+    const cls = chg > 0 ? 'up' : (chg < 0 ? 'down' : 'flat');
+    document.getElementById('shareTip').innerHTML =
+      `<span style="color:var(--muted)">${cur[0]}</span> ` +
+      `价格<b style="color:${this.PRICE_COLOR}">${price == null ? '--' : price.toFixed(3)}</b> ` +
+      `份额<b>${cur[1]}亿份</b> ` +
+      `<b class="${cls}">${chg > 0 ? '+' : ''}${chg}亿份</b>`;
+  },
+
+  init() {
+    const cv = document.getElementById('shareChart');
+    cv.addEventListener('mousemove', e => {
+      const rect = cv.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const body = document.getElementById('shareBody');
+      const m = this.data.length - 1;
+      if (!m || m < 1) return;
+      const PAD_L = 48, PAD_R = 44;
+      const plotW = body.clientWidth - PAD_L - PAD_R;
+      if (x < PAD_L || x > body.clientWidth - PAD_R) return;
+      const cw = plotW / m;
+      this.hover = Math.min(m - 1, Math.max(0, Math.floor((x - PAD_L) / cw)));
+      this.draw();
+    });
+    cv.addEventListener('mouseleave', () => { this.hover = null; this.draw(); });
+    window.addEventListener('resize', () => this.draw());
+  }
+};
+
 /* ================= MACD 监控列表 ================= */
 async function loadWatch() {
   const r = await fetch('/api/stocks');
@@ -525,6 +721,7 @@ document.getElementById('q').addEventListener('input', () => {
 });
 
 KChart.init();
+ShareChart.init();
 window.__kchartReady = true;
 applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的绘制
 loadEtfList();
