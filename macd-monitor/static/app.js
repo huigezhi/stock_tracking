@@ -51,6 +51,54 @@ function setTheme(mode) {
   });
 })();
 
+/* ================= 指数列表 ================= */
+let idxData = [];
+
+async function loadIdxList() {
+  try {
+    const r = await fetch('/api/index/list');
+    idxData = await r.json();
+    renderIdxList();
+  } catch (e) { /* 下轮重试 */ }
+}
+
+function renderIdxList() {
+  const box = document.getElementById('idxList');
+  if (!idxData.length) {
+    box.innerHTML = '<div class="empty">暂无指数数据</div>';
+    return;
+  }
+  box.innerHTML = idxData.map(i => `
+    <div class="etf-item ${curEtf === i.code ? 'active' : ''}" onclick="selectIdx('${i.code}')">
+      <span class="en">${esc(i.name)}</span>
+      <span class="ep ${pctClass(i.chg_pct)}">${i.price.toFixed(2)}</span>
+      <span class="ec">${i.code}</span>
+      <span class="epct ${pctClass(i.chg_pct)}">${fmtPct(i.chg_pct)}</span>
+    </div>`).join('');
+}
+
+function selectIdx(code) {
+  curEtf = code;
+  renderIdxList();
+  renderEtfList();
+  const i = idxData.find(x => x.code === code);
+  if (i) {
+    document.getElementById('chName').textContent = i.name;
+    document.getElementById('chCode').textContent = i.code;
+    document.getElementById('chIndex').textContent = '指数';
+    const p = document.getElementById('chPrice');
+    p.textContent = i.price.toFixed(2);
+    p.className = 'ch-price ' + pctClass(i.chg_pct);
+    const c = document.getElementById('chChg');
+    c.textContent = `${i.chg > 0 ? '+' : ''}${i.chg.toFixed(2)}  ${fmtPct(i.chg_pct)}`;
+    c.className = 'ch-chg ' + pctClass(i.chg_pct);
+    document.getElementById('chAmount').textContent = (i.amount / 1e4).toFixed(2) + '亿';
+    document.getElementById('chShares').textContent = '--';
+  }
+  KChart.load(code, curTf);
+  ShareChart.load(code, curTf);
+}
+
 /* ================= 宽基ETF列表 ================= */
 let etfData = [];
 let curEtf = null;
@@ -83,6 +131,7 @@ function renderEtfList() {
 
 function selectEtf(code) {
   curEtf = code;
+  renderIdxList();
   renderEtfList();
   const e = etfData.find(x => x.code === code);
   if (e) {
@@ -854,9 +903,11 @@ KChart.init();
 ShareChart.init();
 window.__kchartReady = true;
 applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的绘制
+loadIdxList();
 loadEtfList();
 loadWatch();
 loadDivs();
 setInterval(refreshQuotes, 5000);
+setInterval(loadIdxList, 60000);
 setInterval(loadEtfList, 60000);
 setInterval(loadDivs, 3600000);   // 每小时拉一次, 后端每日全量重扫

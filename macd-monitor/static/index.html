@@ -18,8 +18,14 @@
 </header>
 
 <main class="layout">
-  <!-- 左栏: 宽基ETF列表 -->
+  <!-- 左栏: 指数 + 宽基ETF列表 -->
   <aside class="panel etf-panel">
+    <div class="idx-sec">
+      <div class="panel-head">
+        <h2>主要指数</h2>
+      </div>
+      <div id="idxList" class="etf-list"><div class="empty">加载中…</div></div>
+    </div>
     <div class="panel-head">
       <h2>宽基ETF <small>份额≥100亿份</small></h2>
       <span class="upd" id="etfUpd"></span>

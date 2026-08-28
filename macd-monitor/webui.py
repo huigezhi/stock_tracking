@@ -55,6 +55,13 @@ BROAD_ETF_CANDIDATES = {
 }
 MIN_SHARES = 100  # 亿份
 
+# 主要指数列表(左栏展示, 点击查看K线)
+INDEX_LIST = {
+    "sh000001": "上证指数", "sz399001": "深证成指", "sz399006": "创业板指",
+    "sh000688": "科创50", "bj899050": "北证50",
+}
+_INDEX_CACHE = {"ts": 0, "data": []}
+
 CFG_LOCK = threading.Lock()
 SHARE_HIST_PATH = os.path.join(BASE, "etf_share_hist.json")
 SHARE_LOCK = threading.Lock()
@@ -224,6 +231,25 @@ def record_share_snapshots(etf_list):
             os.replace(tmp, SHARE_HIST_PATH)
 
 
+def index_list():
+    """主要指数列表: 行情缓存10分钟"""
+    now = time.time()
+    if _INDEX_CACHE["data"] and now - _INDEX_CACHE["ts"] < 600:
+        return _INDEX_CACHE["data"]
+    quotes = fetch_quotes(list(INDEX_LIST.keys()))
+    out = []
+    for code, name in INDEX_LIST.items():
+        q = quotes.get(code)
+        if not q or not q["price"]:
+            continue
+        out.append({"code": code, "name": name,
+                    "price": q["price"], "chg": q["chg"], "chg_pct": q["chg_pct"],
+                    "amount": q["amount"], "volume": q["volume"]})
+    if out:
+        _INDEX_CACHE["ts"], _INDEX_CACHE["data"] = now, out
+    return out
+
+
 def broad_etf_list():
     """宽基ETF列表: 候选清单中份额>=100亿份的, 缓存10分钟"""
     now = time.time()
@@ -250,8 +276,38 @@ def broad_etf_list():
 
 # ---------------- K线数据 ----------------
 
+def _sina_kline(code, tf, n):
+    """新浪日K回退(腾讯对北证指数等仅返回当日1根时使用); tf=week时拉日线按ISO周聚合"""
+    need = n * 5 if tf == "week" else n
+    try:
+        r = S.get("https://money.finance.sina.com.cn/quotes_service/api/"
+                  f"json_v2.php/CN_MarketData.getKLineData?symbol={code}"
+                  f"&scale=240&ma=no&datalen={min(need, 1023)}",
+                  timeout=10, headers={"Referer": "https://finance.sina.com.cn"})
+        rows = json.loads(r.text)
+        bars = [[x["day"], float(x["open"]), float(x["close"]),
+                 float(x["high"]), float(x["low"]), float(x["volume"])] for x in rows]
+        if tf == "week":
+            out, cur_key = [], None
+            for b in bars:
+                key = datetime.strptime(b[0], "%Y-%m-%d").isocalendar()[:2]
+                if key != cur_key:
+                    out.append(b)
+                    cur_key = key
+                else:  # 同周合并开高低收
+                    last = out[-1]
+                    last[2] = b[2]                       # 收盘取最后
+                    last[3] = max(last[3], b[3])          # 最高
+                    last[4] = min(last[4], b[4])          # 最低
+                    last[5] += b[5]                       # 成交量累加
+            return out[-n:] if n else out
+        return bars
+    except Exception:
+        return []
+
+
 def fetch_kline(code, tf="day", n=800):
-    """腾讯前复权K线(失败回退非复权, 再回退kline接口), 返回 [[date, open, close, high, low, volume], ...]"""
+    """腾讯前复权K线(失败回退非复权, 再回退kline接口, 最后新浪日K聚合), 返回 [[date, open, close, high, low, volume], ...]"""
     n = max(60, min(int(n or 800), 800))
     tf = tf if tf in ("day", "week") else "day"
     urls = [
@@ -264,12 +320,12 @@ def fetch_kline(code, tf="day", n=800):
             r = S.get(url, timeout=10)
             data = r.json().get("data", {}).get(code, {})
             rows = data.get(f"qfq{tf}") or data.get(tf)
-            if rows:
+            if rows and len(rows) > 5:   # 数据量过少视为无效(如北证指数仅返回当日1根)
                 return [[row[0], float(row[1]), float(row[2]),
                          float(row[3]), float(row[4]), float(row[5])] for row in rows]
         except Exception:
             continue
-    return []
+    return _sina_kline(code, tf, n)
 
 
 def get_etf_share_history(code, tf="day"):
@@ -548,6 +604,8 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/search":
             q = parse_qs(u.query).get("q", [""])[0]
             self._json(search_suggest(q))
+        elif u.path == "/api/index/list":
+            self._json(index_list())
         elif u.path == "/api/etf/list":
             self._json(broad_etf_list())
         elif u.path == "/api/etf/share":
