@@ -612,7 +612,26 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
 
+def _rescan_today():
+    """--rescan: 删除当日扫描缓存, 保留其余29天历史, 启动后扫描线程会立即全量重扫"""
+    today = time.strftime("%Y-%m-%d")
+    days = _load_div_hist()
+    if today in days:
+        del days[today]
+        _save_div_hist(days)
+        print(f"已清除 {today} 的扫描缓存, 启动后将立即重新全量扫描")
+    else:
+        print(f"{today} 尚无扫描缓存, 启动后将直接全量扫描")
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="MACD 监控自选管理 Web UI")
+    ap.add_argument("--rescan", action="store_true",
+                    help="清除今日底背离扫描缓存并全量重扫(保留其余29天历史)")
+    args = ap.parse_args()
+    if args.rescan:
+        _rescan_today()
     # 公网部署时建议 WEBUI_HOST=127.0.0.1 仅本机监听, 通过SSH隧道访问
     host = os.environ.get("WEBUI_HOST", "0.0.0.0")
     port = int(os.environ.get("WEBUI_PORT", str(PORT)))

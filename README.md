@@ -101,6 +101,9 @@ python3 monitor.py
 # 5. 启动 Web UI (另一个终端)
 python3 webui.py
 # 浏览器打开 http://localhost:8688
+
+# 重跑今日底背离全量扫描(清除当日缓存, 保留其余29天历史)
+python3 webui.py --rescan
 ```
 
 ## VPS 服务器部署（systemd 开机自启）
