@@ -6,5 +6,7 @@ macd-monitor/monitor.log
 macd-monitor/all_stocks.json
 macd-monitor/etf_share_hist.json
 macd-monitor/div_hist.json
+macd-monitor/div_hist.json.bak
 macd-monitor/kline_cache.json
+macd-monitor/data.db*
 __pycache__/

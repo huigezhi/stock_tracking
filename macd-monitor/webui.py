@@ -22,6 +22,7 @@ import requests
 # 复用监控进程的 MACD/背离检测逻辑, 保证面板与推送口径一致
 from monitor import bar_complete, detect_divergences, now_cst
 from monitor import macd as calc_macd
+import db
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -513,6 +514,123 @@ def fetch_all_stocks():
     return out
 
 
+# ---------------- 共振评分(信号质量过滤) ----------------
+# 全部基于已拉取的K线本地计算, 不产生额外网络请求
+# 权重经统计面板(/api/stats 按共振分分层)可校准
+
+TAG_LABELS = {
+    "vol_shrink": "缩量",       # 第二低点量能 < 第一低点70%
+    "ma_hold": "均线托底",       # 确认日站上20日线或20日线止跌
+    "rsi_repair": "RSI修复",     # 低点RSI超卖后回升
+    "kdj_gold": "KDJ金叉",      # 低点至确认日间K上穿D
+    "week_align": "周线同向",    # (日线信号)周线DIF零轴下方上行
+    "vol_engulf": "放量反包",    # 确认日阳线吞没前根实体且放量
+}
+TAG_WEIGHTS = {"vol_shrink": 2, "ma_hold": 2, "rsi_repair": 1,
+              "kdj_gold": 1, "week_align": 2, "vol_engulf": 1}
+
+
+def _sma(vals, n):
+    out, s = [], 0.0
+    for i, v in enumerate(vals):
+        s += v
+        if i >= n:
+            s -= vals[i - n]
+        out.append(s / n if i >= n - 1 else None)
+    return out
+
+
+def _rsi(closes, n=14):
+    out = [None] * len(closes)
+    gains = losses = 0.0
+    for i in range(1, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        g, l = max(ch, 0), max(-ch, 0)
+        if i <= n:   # 首个周期用简单平均
+            gains += g
+            losses += l
+            if i == n:
+                ag, al = gains / n, losses / n
+                out[i] = 100 - 100 / (1 + (ag / al if al else 1e9))
+        else:        # Wilder平滑
+            ag = (ag * (n - 1) + g) / n
+            al = (al * (n - 1) + l) / n
+            out[i] = 100 - 100 / (1 + (ag / al if al else 1e9))
+    return out
+
+
+def _kdj(klines, n=9):
+    """KDJ(9,3,3), 返回 (K[], D[]); 前部None"""
+    k_l, d_l, pk, pd = [], [], None, None
+    for i in range(len(klines)):
+        lo = min(klines[j][4] for j in range(max(0, i - n + 1), i + 1))
+        hi = max(klines[j][3] for j in range(max(0, i - n + 1), i + 1))
+        rsv = 50.0 if hi == lo else (klines[i][2] - lo) / (hi - lo) * 100
+        pk = 50.0 if pk is None else pk * 2 / 3 + rsv / 3
+        pd = 50.0 if pd is None else pd * 2 / 3 + pk / 3
+        k_l.append(None if i < n - 1 else pk)
+        d_l.append(None if i < n - 1 else pd)
+    return k_l, d_l
+
+
+def _week_closes(klines):
+    """日线按ISO周聚合出周收盘序列"""
+    out, cur_key = [], None
+    for k in klines:
+        key = datetime.strptime(k[0], "%Y-%m-%d").isocalendar()[:2]
+        if key != cur_key:
+            out.append(k[2])
+            cur_key = key
+        else:
+            out[-1] = k[2]
+    return out
+
+
+def _resonance(klines, closes, p1, p2, cidx, tf):
+    """计算底背离信号的共振标签与加权分"""
+    tags = []
+    vols = [k[5] for k in klines]
+    # 缩量: 低点附近3根均量比较
+    v1 = sum(vols[max(0, p1 - 2):p1 + 1]) / (p1 + 1 - max(0, p1 - 2))
+    v2 = sum(vols[max(0, p2 - 2):p2 + 1]) / (p2 + 1 - max(0, p2 - 2))
+    if v1 > 0 and v2 < 0.7 * v1:
+        tags.append("vol_shrink")
+    # 均线托底
+    ma20 = _sma(closes, 20)
+    if ma20[cidx] is not None:
+        prev = ma20[cidx - 5] if cidx >= 5 else None
+        if closes[cidx] > ma20[cidx] or (prev is not None and ma20[cidx] >= prev):
+            tags.append("ma_hold")
+    # RSI修复
+    rsi = _rsi(closes)
+    if (rsi[p2] is not None and rsi[cidx] is not None
+            and rsi[p2] < 35 and rsi[cidx] > rsi[p2]):
+        tags.append("rsi_repair")
+    # KDJ金叉
+    k_l, d_l = _kdj(klines)
+    for j in range(max(1, p2), cidx + 1):
+        if (k_l[j] is not None and d_l[j] is not None
+                and k_l[j - 1] is not None and d_l[j - 1] is not None
+                and k_l[j - 1] <= d_l[j - 1] and k_l[j] > d_l[j]):
+            tags.append("kdj_gold")
+            break
+    # 周线同向(仅日线信号)
+    if tf == "day":
+        wcloses = _week_closes(klines)
+        if len(wcloses) >= 30:
+            wdif, _, _ = calc_macd(wcloses)
+            if wdif[-1] < 0 and wdif[-1] > wdif[-2]:
+                tags.append("week_align")
+    # 放量反包
+    if cidx >= 1:
+        o, c = klines[cidx][1], klines[cidx][2]
+        po, pc = klines[cidx - 1][1], klines[cidx - 1][2]
+        if c > o and o <= pc and c >= po and vols[cidx] > vols[cidx - 1]:
+            tags.append("vol_engulf")
+    score = sum(TAG_WEIGHTS.get(t, 0) for t in tags)
+    return tags, score
+
+
 def _scan_one_divs(stock, now):
     """扫描单只股票的日线/周线底背离, 只保留最近 DIV_RECENT 周期内成立的信号"""
     code = stock["code"]
@@ -536,12 +654,15 @@ def _scan_one_divs(stock, now):
             if d["div"] != "bull" or d["p2"] < last - DIV_RECENT + 1:
                 continue   # 只要最近100周期内成立的底背离
             p2 = d["p2"]
+            cidx = min(d["confirm"], last)   # 确认日索引
 
             def _chg(n):
                 """第二低点后n周期的涨幅%, K线不足返回None"""
                 j = p2 + n
                 return round((closes[j] / d["c2"] - 1) * 100, 2) if j <= last else None
 
+            # 共振标签与加权分(纯本地计算)
+            tags, score = _resonance(klines[:last + 1], closes, d["p1"], p2, cidx, tf)
             rows.append({
                 "code": code, "name": stock["name"], "price": stock["price"],
                 "tf": tf, "tf_name": tf_name,
@@ -550,41 +671,15 @@ def _scan_one_divs(stock, now):
                 "dif1": round(d["d1"], 3), "dif2": round(d["d2"], 3),
                 "dif_inc": round(d["d2"] - d["d1"], 3),   # DIF增加值
                 "chg3": _chg(3), "chg5": _chg(5),          # 后3/5周期涨幅%
-                "confirm": bars[min(d["confirm"], last)][0],
+                "confirm": bars[cidx][0],
+                "confirm_close": closes[cidx],            # 跟踪基准: 确认日收盘
+                "score": score, "tags": ",".join(tags),
             })
         time.sleep(0.05)   # 轻微限速, 避免触发行情接口WAF
     return rows
 
 
-DIV_HIST_PATH = os.path.join(BASE, "div_hist.json")
-DIV_KEEP_DAYS = 30   # 滚动保留最近30个扫描日的底背离结果, 第31天淘汰第1天
-
-
-def _load_div_hist():
-    """读取按扫描日持久化的底背离历史, 只保留最近 DIV_KEEP_DAYS 个扫描日"""
-    days = load_json(DIV_HIST_PATH, {}).get("days", {})
-    if not isinstance(days, dict):
-        days = {}
-    for k in sorted(days)[:max(0, len(days) - DIV_KEEP_DAYS)]:
-        days.pop(k, None)
-    return days
-
-
-def _save_div_hist(days):
-    tmp = DIV_HIST_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"ts": time.time(), "days": days}, f, ensure_ascii=False)
-    os.replace(tmp, DIV_HIST_PATH)
-
-
-def _flatten_div_hist(days):
-    """合并各扫描日的结果, 每行附带 scan=扫描日, 按确认日期倒序"""
-    rows = []
-    for d in days:
-        for r in days[d]:
-            rows.append({**r, "scan": d})
-    rows.sort(key=lambda r: (r["confirm"], r["code"]), reverse=True)
-    return rows
+DIV_KEEP_DAYS = 30   # 表格只展示最近30个扫描日内出现过的信号(库内保留2年供统计)
 
 
 def _is_trading_day(day_str):
@@ -607,19 +702,20 @@ def _next_scan_wait(now):
 
 def _div_scanner():
     """后台线程: 每个交易日收盘后(北京时间16:00)对全部A股的日线/周线底背离全量重扫。
-    非交易日(周末/节假日)不扫描, 也不计入30天滚动窗口; 当日已扫过(含重启)直接用缓存不重扫"""
+    结果UPSERT进SQLite(按code+tf+第二低点去重), 非交易日不扫描;
+    当日已扫过(含重启)直接用库内数据不重扫"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     while True:
         try:
-            days = _load_div_hist()
             with DIV_LOCK:
-                DIV_SCAN["rows"] = _flatten_div_hist(days)
-                DIV_SCAN["ts"] = load_json(DIV_HIST_PATH, {}).get("ts", 0)
+                DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
+                DIV_SCAN["ts"] = time.mktime(time.strptime(
+                    db.last_scan_date() or "2000-01-01", "%Y-%m-%d"))
             now = now_cst()
             today = now.strftime("%Y-%m-%d")
             # 触发条件: 工作日 + 收盘后(16点) + 交易日 + 今日未扫过
             due = (now.weekday() < 5 and now.hour >= DIV_SCAN_HOUR
-                   and _is_trading_day(today) and today not in days)
+                   and _is_trading_day(today) and db.last_scan_date() != today)
             ok = True
             if due:
                 with DIV_LOCK:
@@ -638,12 +734,9 @@ def _div_scanner():
                                 pass
                             with DIV_LOCK:
                                 DIV_SCAN["done"] += 2
-                    days[today] = rows
-                    for k in sorted(days)[:max(0, len(days) - DIV_KEEP_DAYS)]:
-                        days.pop(k, None)   # 淘汰第31天以前的数据
-                    _save_div_hist(days)
+                    db.upsert_signals(rows, today)
                     with DIV_LOCK:
-                        DIV_SCAN["rows"] = _flatten_div_hist(days)
+                        DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
                         DIV_SCAN["ts"] = time.time()
                 except Exception:
                     ok = False   # 扫描中断: 当日未标记, 稍后重试
@@ -656,6 +749,53 @@ def _div_scanner():
                 time.sleep(_next_scan_wait(now_cst()))   # 休眠到下一个16:00
         except Exception:
             time.sleep(300)
+
+
+# ---------------- 信号跟踪回填(复盘统计) ----------------
+
+TRACK_HOUR = 17   # 每日17:00后回填(16:00扫描完成后)
+
+
+def _track_backfill():
+    """后台线程: 每日收盘后对跟踪数据不完整的信号回填确认日后3/5/10/20/60个交易日收益。
+    按标的去重拉一次K线; 已完整的信号不再处理"""
+    while True:
+        try:
+            now = now_cst()
+            target = now.replace(hour=TRACK_HOUR, minute=0, second=0, microsecond=0)
+            if now < target:
+                time.sleep(max(60.0, (target - now).total_seconds()))
+                continue
+            pending = db.pending_track()
+            groups = {}
+            for p in pending:
+                groups.setdefault((p["code"], p["tf"]), []).append(p)
+            for (code, tf), sigs in groups.items():
+                try:
+                    klines = fetch_kline(code, tf, 800)
+                except Exception:
+                    continue
+                if len(klines) < 30:
+                    continue
+                dates = [k[0] for k in klines]
+                closes = [k[2] for k in klines]
+                for s in sigs:
+                    if s["confirm"] not in dates:   # 确认日K线已滚出窗口
+                        continue
+                    base = s["confirm_close"] or closes[dates.index(s["confirm"])]
+                    if not base:
+                        continue
+                    i0 = dates.index(s["confirm"])
+                    fwd = {}
+                    for n in (3, 5, 10, 20, 60):
+                        j = i0 + n
+                        fwd[f"fwd{n}"] = (round((closes[j] / base - 1) * 100, 2)
+                                           if j < len(closes) else None)
+                    db.update_track(s["id"], fwd)
+                time.sleep(0.1)   # 轻微限速
+            time.sleep(_next_scan_wait(now_cst()) + 3600)   # 明日17点后
+        except Exception:
+            time.sleep(600)
 
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -801,6 +941,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(get_kline_cached(code, tf, n))
             else:
                 self._json(fetch_kline(code, tf, n))
+        elif u.path == "/api/stats":
+            # 复盘统计: 总览 + 周期/共振分/确认月份分层
+            self._json(db.stats())
+        elif u.path == "/api/tags":
+            # 共振标签定义(前端展示徽章用)
+            self._json({"labels": TAG_LABELS, "weights": TAG_WEIGHTS})
         else:
             self.send_error(404)
 
@@ -851,23 +997,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _rescan_today():
-    """--rescan: 删除当日扫描缓存, 保留其余29天历史, 启动后扫描线程会立即全量重扫"""
+    """--rescan: 删除今日扫描的信号, 启动后扫描线程会立即全量重扫"""
     today = time.strftime("%Y-%m-%d")
-    days = _load_div_hist()
-    if today in days:
-        del days[today]
-        _save_div_hist(days)
-        print(f"已清除 {today} 的扫描缓存, 启动后将立即重新全量扫描")
-    else:
-        print(f"{today} 尚无扫描缓存, 启动后将直接全量扫描")
+    with db.conn() as c:
+        cur = c.execute("DELETE FROM div_signal WHERE scan_last=? AND scan_first=?",
+                        (today, today))
+        removed = cur.rowcount
+    print(f"已清除 {today} 扫描的 {removed} 条信号, 启动后将立即重新全量扫描"
+          if removed else f"{today} 尚无当日新扫信号, 启动后将直接全量扫描")
 
 
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="MACD 监控自选管理 Web UI")
     ap.add_argument("--rescan", action="store_true",
-                    help="清除今日底背离扫描缓存并全量重扫(保留其余29天历史)")
+                    help="清除今日底背离扫描结果并全量重扫")
     args = ap.parse_args()
+    db.init()   # 建表 + 旧div_hist.json一次性导入 + 过期清理
     if args.rescan:
         _rescan_today()
     # 公网部署时建议 WEBUI_HOST=127.0.0.1 仅本机监听, 通过SSH隧道访问
@@ -875,6 +1021,7 @@ def main():
     port = int(os.environ.get("WEBUI_PORT", str(PORT)))
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
+    threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
     print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()
 

@@ -236,6 +236,45 @@ body.dark .tag.zs { background: #3d331a; }
 .login-err { color: var(--down); font-size: 12px; min-height: 16px; text-align: center; }
 .login-card button { background: var(--accent); color: #fff; padding: 9px; border-radius: 8px;
                      font-size: 14px; cursor: pointer; border: none; }
+/* 共振徽章与分数 */
+.tagb { display: inline-block; margin: 0 1px; padding: 0 4px; border-radius: 3px;
+        font-size: 10px; line-height: 15px; background: var(--line); color: var(--muted);
+        vertical-align: middle; }
+.dsc b { margin-right: 3px; font-size: 13px; }
+.dsc .sc-hi { color: var(--up); }
+.dsc .sc-mid { color: #f5a623; }
+.dsc .sc-lo { color: var(--muted); }
+.stats-btn { background: var(--line); color: var(--fg); border: 1px solid var(--line);
+             padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+             margin-right: 8px; }
+.stats-btn:hover { border-color: var(--accent); }
+/* 复盘统计弹窗 */
+.stats-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 99;
+             display: flex; align-items: center; justify-content: center; }
+.stats-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+              width: min(920px, 94vw); max-height: 88vh; display: flex; flex-direction: column;
+              box-shadow: 0 8px 32px rgba(0,0,0,.25); }
+.stats-head { display: flex; justify-content: space-between; align-items: center;
+              padding: 14px 20px 0; }
+.stats-close { background: none; border: none; color: var(--muted); font-size: 16px;
+               cursor: pointer; padding: 2px 6px; }
+.stats-body { padding: 12px 20px 20px; overflow-y: auto; }
+.stats-body h4 { margin: 16px 0 8px; font-size: 13px; color: var(--muted); }
+.sc-note { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.sc-cells { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.sc-cell { border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+           text-align: center; }
+.sc-n { font-size: 11px; color: var(--muted); }
+.sc-win { font-size: 20px; font-weight: 700; margin: 2px 0; }
+.sc-avg { font-size: 12px; }
+.sc-cnt { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.stats-table th, .stats-table td { padding: 5px 6px; border-bottom: 1px solid var(--line);
+                                   text-align: right; white-space: nowrap; }
+.stats-table th:first-child, .stats-table td:first-child { text-align: left; }
+.stats-table th { color: var(--muted); font-weight: 500; }
+.stats-table .empty { text-align: center; color: var(--muted); padding: 14px; }
+@media (max-width: 720px) { .sc-cells { grid-template-columns: repeat(2, 1fr); } }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }

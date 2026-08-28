@@ -999,7 +999,9 @@ function updateDivDateOptions() {
 /* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
 let divSort = {key: 'confirm', dir: 'desc'};
 const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc',
-                       chg3: 'sortChg3', chg5: 'sortChg5'};
+                       chg3: 'sortChg3', chg5: 'sortChg5', score: 'sortScore'};
+const TAG_LABELS = {vol_shrink: '缩量', ma_hold: '均线托底', rsi_repair: 'RSI修复',
+                    kdj_gold: 'KDJ金叉', week_align: '周线同向', vol_engulf: '放量反包'};
 
 function toggleDivSort(key) {
   if (divSort.key === key) {
@@ -1033,11 +1035,11 @@ function renderDivTable() {
   document.getElementById('divCount').textContent =
       divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
   if (!divAll.length) {
-    body.innerHTML = '<tr><td colspan="10" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty">暂无底背离标的</td></tr>';
     return;
   }
   if (!divFiltered.length) {
-    body.innerHTML = '<tr><td colspan="10" class="empty">无符合条件的标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty">无符合条件的标的</td></tr>';
     return;
   }
   let rows = divFiltered;
@@ -1054,6 +1056,13 @@ function renderDivTable() {
   const fmtPct = v => v == null ? '--' :
       `<span class="${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
   const idxOf = new Map(divFiltered.map((r, i) => [r, i]));   // 行对象→筛选结果下标
+  const scoreCell = r => {
+    if (r.score == null) return '<td class="dv">--</td>';
+    const tags = (r.tags || '').split(',').filter(Boolean);
+    const badges = tags.map(t =>
+        `<span class="tagb" title="${TAG_LABELS[t] || t}">${TAG_LABELS[t] || t}</span>`).join('');
+    return `<td class="dv dsc"><b class="${r.score >= 5 ? 'sc-hi' : r.score >= 3 ? 'sc-mid' : 'sc-lo'}">${r.score}</b>${badges}</td>`;
+  };
   body.innerHTML = rows.map((r, i) => `
     <tr class="div-row" onclick="viewDivIdx(${idxOf.get(r)})">
       <td class="di">${i + 1}</td>
@@ -1065,6 +1074,7 @@ function renderDivTable() {
       <td class="dv">${r.dif_inc != null ? r.dif_inc.toFixed(3) : '--'}</td>
       <td class="dv">${fmtPct(r.chg3)}</td>
       <td class="dv">${fmtPct(r.chg5)}</td>
+      ${scoreCell(r)}
       <td class="dd">${r.confirm}</td>
     </tr>`).join('');
 }
@@ -1084,6 +1094,66 @@ function viewDivIdx(i) {
   document.getElementById('chAmount').textContent = '--';
   document.getElementById('chShares').textContent = '--';
   switchTf(r.tf);
+}
+
+/* ================= 复盘统计弹窗 ================= */
+async function openStats() {
+  document.getElementById('statsBox').style.display = 'flex';
+  const body = document.getElementById('statsBody');
+  body.innerHTML = '加载中…';
+  try {
+    const r = await apiFetch('/api/stats');
+    renderStats(await r.json());
+  } catch (e) {
+    body.innerHTML = '<div class="empty">加载失败, 请重试</div>';
+  }
+}
+
+function closeStats() {
+  document.getElementById('statsBox').style.display = 'none';
+}
+
+function renderStats(s) {
+  const body = document.getElementById('statsBody');
+  if (!s || !s.total) {
+    body.innerHTML = '<div class="empty">暂无已跟踪信号(扫描运行后按日积累)</div>';
+    return;
+  }
+  const pc = v => v == null ? '--' :
+      `<span class="${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : ''}${v}%</span>`;
+  const wr = v => v == null ? '--' : `${v}%`;
+  // 总览卡片: 胜率/平均收益矩阵(3/5/10/20/60周期)
+  const o = s.overall;
+  const cell = (n) => `
+    <div class="sc-cell">
+      <div class="sc-n">${n}周期</div>
+      <div class="sc-win">${wr(o['win' + n])}</div>
+      <div class="sc-avg">${pc(o['avg' + n])}</div>
+      <div class="sc-cnt">${o['n' + n]}样本</div>
+    </div>`;
+  // 分层表: 周期 / 共振分
+  const rowsHtml = arr => arr.map(x => `
+    <tr><td>${x.name}</td><td>${x.n3 || 0}</td><td>${wr(x.win3)}</td><td>${pc(x.avg3)}</td>
+    <td>${wr(x.win5)}</td><td>${pc(x.avg5)}</td><td>${wr(x.win10)}</td><td>${pc(x.avg10)}</td>
+    <td>${wr(x.win20)}</td><td>${pc(x.avg20)}</td><td>${wr(x.win60)}</td><td>${pc(x.avg60)}</td></tr>`).join('');
+  const months = s.by_month.map(m => `
+    <tr><td>${m.key}</td><td>${m.n}</td><td>${wr(m.win5)}</td><td>${pc(m.avg5)}</td><td>${pc(m.avg20)}</td></tr>`).join('');
+  body.innerHTML = `
+    <div class="sc-note">信号总数 ${s.total} · 确认日期 ${s.from || '--'} ~ ${s.to || '--'} ·
+      胜率/收益均自<b>确认日收盘</b>起算(可实际入场点); 共振分越高代表多指标共振越强</div>
+    <div class="sc-cells">${[3, 5, 10, 20, 60].map(cell).join('')}</div>
+    <h4>按周期 / 共振分分层</h4>
+    <table class="stats-table">
+      <thead><tr><th>分层</th><th>样本</th><th>3日胜率</th><th>3日均收</th>
+      <th>5日胜率</th><th>5日均收</th><th>10日胜率</th><th>10日均收</th>
+      <th>20日胜率</th><th>20日均收</th><th>60日胜率</th><th>60日均收</th></tr></thead>
+      <tbody>${rowsHtml(s.by_tf)}${rowsHtml(s.by_score)}</tbody>
+    </table>
+    <h4>按确认月份(近12个月)</h4>
+    <table class="stats-table slim">
+      <thead><tr><th>月份</th><th>信号数</th><th>5日胜率</th><th>5日均收</th><th>20日均收</th></tr></thead>
+      <tbody>${months || '<tr><td colspan="5" class="empty">暂无数据</td></tr>'}</tbody>
+    </table>`;
 }
 
 KChart.init();
