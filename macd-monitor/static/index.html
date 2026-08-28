@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MACD 监控 · 自选管理</title>
 <link rel="stylesheet" href="/static/style.css">
+<!-- PWA: 可安装到主屏幕, 断网时打开离线快照 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#141a26">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MACD监控">
 </head>
 <body>
 <header class="topbar">
@@ -16,7 +24,15 @@
     <option value="light">白天</option>
     <option value="dark">夜间</option>
   </select>
+  <button class="sys-btn" id="sysBtn" onclick="openSys()" title="系统健康与事件日志">系统</button>
 </header>
+<div class="offline-banner" id="offlineBanner" style="display:none">
+  网络已断开，正在展示离线内容，行情暂停更新
+</div>
+<div class="ios-guide" id="iosGuide" style="display:none">
+  <span>💡 添加到主屏幕：Safari 底部分享 → 「添加到主屏幕」，即可全屏类App使用</span>
+  <button onclick="dismissIosGuide()">知道了</button>
+</div>
 
 <main class="layout">
   <!-- 左栏: 指数 + 宽基ETF列表 -->
@@ -136,6 +152,25 @@
     <div class="stats-body" id="statsBody">加载中…</div>
   </div>
 </div>
+<div class="sys-mask" id="sysBox" style="display:none" onclick="if(event.target===this)closeSys()">
+  <div class="sys-card">
+    <div class="sys-head">
+      <span>系统状态</span>
+      <button class="sys-close" onclick="closeSys()">✕</button>
+    </div>
+    <div class="sys-health" id="sysHealth">加载中…</div>
+    <div class="sys-loghead">
+      <span class="sys-logtitle">事件日志</span>
+      <span class="sys-lvls" id="sysLvls">
+        <button class="active" data-lvl="" onclick="setLogLvl(this)">全部</button>
+        <button data-lvl="ERROR" onclick="setLogLvl(this)">错误</button>
+        <button data-lvl="WARN" onclick="setLogLvl(this)">警告</button>
+        <button data-lvl="INFO" onclick="setLogLvl(this)">信息</button>
+      </span>
+    </div>
+    <div class="sys-logs" id="sysLogs"></div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 <div class="login-mask" id="loginBox" style="display:none">
   <div class="login-card">
@@ -146,6 +181,7 @@
     <button onclick="submitLogin()">进入</button>
   </div>
 </div>
+<script src="/static/chart.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

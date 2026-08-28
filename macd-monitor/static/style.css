@@ -299,3 +299,67 @@ body.dark .tag.zs { background: #3d331a; }
                 border-color: rgba(208,58,47,.35); }
 .res-badge.down { color: var(--down); background: rgba(10,138,74,.10);
                   border-color: rgba(10,138,74,.35); }
+/* 移动端K线触摸手势(禁用浏览器默认滚动/缩放, 由 chart.js 接管) */
+#kchart { touch-action: none; }
+/* 顶栏系统按钮 */
+.sys-btn { background: var(--line); color: var(--fg); border: 1px solid var(--line);
+          padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+          flex: none; }
+.sys-btn:hover { border-color: var(--accent); }
+/* 离线横幅(断网提示) */
+.offline-banner { display: none; align-items: center; justify-content: center;
+                  gap: 6px; background: rgba(208,58,47,.12); color: var(--up);
+                  border-bottom: 1px solid rgba(208,58,47,.3);
+                  padding: 6px 12px; font-size: 13px; }
+/* iOS 主屏安装引导 */
+.ios-guide { display: none; align-items: center; justify-content: center; gap: 10px;
+             background: rgba(38,166,154,.10); color: var(--fg);
+             border-bottom: 1px solid rgba(38,166,154,.3);
+             padding: 7px 12px; font-size: 13px; flex-wrap: wrap; }
+.ios-guide button { background: var(--accent); color: #fff; border: none;
+                    padding: 3px 12px; border-radius: 6px; font-size: 12px;
+                    cursor: pointer; flex: none; }
+/* 系统状态弹窗(健康卡片 + 事件日志) */
+.sys-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 101;
+            display: flex; align-items: center; justify-content: center; }
+.sys-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+            width: min(720px, 94vw); max-height: 88vh; display: flex;
+            flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,.25); }
+.sys-head { display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 20px 0; font-weight: 700; }
+.sys-close { background: none; border: none; color: var(--muted); font-size: 16px;
+             cursor: pointer; padding: 2px 6px; }
+.sys-health { padding: 12px 20px; }
+.sh-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+@media (max-width: 720px) { .sh-grid { grid-template-columns: repeat(2, 1fr); } }
+.sh-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+           text-align: center; }
+.sh-card.warn { border-color: var(--up); background: rgba(208,58,47,.06); }
+.sh-card.warn .sh-v { color: var(--up); }
+.sh-v { font-size: 18px; font-weight: 700; }
+.sh-l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.sh-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
+          padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.sh-row span { color: var(--muted); flex: none; }
+.sh-row b { text-align: right; word-break: break-all; font-weight: 500; }
+.sys-loghead { display: flex; justify-content: space-between; align-items: center;
+               padding: 8px 20px 6px; }
+.sys-logtitle { font-size: 13px; color: var(--muted); }
+.sys-lvls button { background: var(--line); color: var(--fg); border: 1px solid var(--line);
+                   padding: 2px 10px; border-radius: 6px; font-size: 11px;
+                   cursor: pointer; margin-left: 4px; }
+.sys-lvls button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sys-logs { overflow-y: auto; max-height: 40vh; margin: 0 20px 16px;
+           border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+           font-size: 12px; }
+.sl-row { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line);
+          align-items: baseline; }
+.sl-row:last-child { border-bottom: none; }
+.sl-t { color: var(--muted); font-size: 11px; flex: none; }
+.sl-l { flex: none; font-size: 10px; font-weight: 700; width: 38px; text-align: center;
+        border-radius: 3px; padding: 1px 0; }
+.sl-row.lvl-error .sl-l { color: #fff; background: var(--up); }
+.sl-row.lvl-warn .sl-l { color: #7a5200; background: rgba(230,194,23,.25); }
+.sl-row.lvl-info .sl-l { color: var(--muted); background: var(--line); }
+.sl-m { color: var(--accent); flex: none; }
+.sl-x { word-break: break-all; }

@@ -28,6 +28,7 @@ from monitor import (bar_complete, combine_resonance, detect_divergences,
 from monitor import macd as calc_macd
 import db
 import net
+import obs
 from net import robust_get, fetch_quotes_any
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1012,8 +1013,11 @@ def _div_scanner():
                     with DIV_LOCK:
                         DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
                         DIV_SCAN["ts"] = time.time()
-                except Exception:
+                    obs.record("INFO", "scan",
+                               f"全市场底背离扫描完成: {len(rows)}条信号入库")
+                except Exception as e:
                     ok = False   # 扫描中断: 当日未标记, 稍后重试
+                    obs.record("ERROR", "scan", f"全市场扫描中断: {e!r}")
                 finally:
                     with DIV_LOCK:
                         DIV_SCAN["scanning"] = False
@@ -1021,7 +1025,8 @@ def _div_scanner():
                 time.sleep(600)   # 扫描失败, 10分钟后重试当日
             else:
                 time.sleep(_next_scan_wait(now_cst()))   # 休眠到下一个16:00
-        except Exception:
+        except Exception as e:
+            obs.record("ERROR", "scan", f"扫描线程异常: {e!r}")
             time.sleep(300)
 
 
@@ -1074,7 +1079,7 @@ def _track_backfill():
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
-        ".ico": "image/x-icon"}
+        ".ico": "image/x-icon", ".webmanifest": "application/manifest+json; charset=utf-8"}
 
 # ---------------- Web UI 访问认证 ----------------
 # config.json: webui.auth_token 非空时启用, 所有 /api/* 需携带
@@ -1121,6 +1126,10 @@ def _auth_check(handler, count_fail=True):
             fails = 0
         fails += 1
         _AUTH_FAILS[ip] = (fails, now_ts + AUTH_LOCK_SEC if fails >= AUTH_FAIL_LIMIT else lock_until)
+    if fails >= AUTH_FAIL_LIMIT:
+        obs.record("ERROR", "auth", f"IP {ip} 连续{fails}次认证失败, 锁定{AUTH_LOCK_SEC}s")
+    else:
+        obs.record("WARN", "auth", f"IP {ip} 认证失败({fails}/{AUTH_FAIL_LIMIT})")
     return -1
 
 
@@ -1229,8 +1238,17 @@ class Handler(BaseHTTPRequestHandler):
             # 多周期共振快照(60分/日/周, 前端初始加载; 之后走SSE)
             with RESONANCE_LOCK:
                 self._json({"rows": list(RESONANCE_ROWS), "ts": RESONANCE_TS})
+        elif u.path == "/api/logs":
+            # 结构化日志: obs 进程内事件缓冲(新的在前), 支持级别过滤
+            q = parse_qs(u.query)
+            lvl = q.get("lvl", [""])[0]
+            try:
+                limit = min(300, max(1, int(q.get("limit", ["100"])[0] or 100)))
+            except ValueError:
+                limit = 100
+            self._json({"rows": obs.recent(lvl=lvl or None, limit=limit)})
         elif u.path == "/api/health":
-            # 健康检查: 数据源状态/扫描状态/订阅数
+            # 健康检查: 数据源状态/扫描状态/订阅数/进程可观测性
             with DIV_LOCK:
                 scan = {k: DIV_SCAN[k] for k in ("scanning", "done", "total", "ts")}
             with _hub_subs_lock:
@@ -1247,7 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
                 n_res = len(RESONANCE_ROWS)
             self._json({"ok": True, "sources": net.health(), "scan": scan,
                         "sse_subs": nsubs, "kline_bars": kc, "intraday": n_intraday,
-                        "resonance": n_res,
+                        "resonance": n_res, "obs": obs.health(),
                         "db_signals": len(db.div_rows(3650))})
         elif u.path == "/api/stream":
             self._handle_stream(parse_qs(u.query).get("codes", [""])[0])

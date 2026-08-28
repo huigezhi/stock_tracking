@@ -13,6 +13,8 @@ import time
 
 import requests
 
+import obs
+
 S = requests.Session()
 
 # ---------------- 令牌桶限流 ----------------
@@ -77,6 +79,7 @@ class CircuitBreaker:
         domain = url.split("/")[2]
         with self.lock:
             if ok:
+                was_open = domain in self.open_until
                 self.fails[domain] = 0
                 self.open_until.pop(domain, None)
             else:
@@ -85,6 +88,10 @@ class CircuitBreaker:
                 if n >= self.fail_threshold:
                     self.open_until[domain] = time.time() + self.cooldown_sec
                     self.fails[domain] = 0
+        if not ok and domain in self.open_until:
+            obs.record("ERROR", "net", f"域名熔断开启: {domain} 冷却{self.cooldown_sec}s")
+        elif ok and was_open:
+            obs.record("INFO", "net", f"域名恢复回切: {domain}")
 
     def status(self):
         with self.lock:
@@ -172,6 +179,10 @@ def fetch_quotes_any(codes):
         q = _sina_quote(c)
         if q:
             out[c] = q
+    if missing:
+        got = sum(1 for c in missing if c in out)
+        obs.record("WARN" if got else "ERROR", "net",
+                   f"行情主源缺{len(missing)}个, 新浪备源补回{got}个")
     return out
 
 
