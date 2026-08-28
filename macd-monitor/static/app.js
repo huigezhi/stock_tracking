@@ -721,7 +721,8 @@ document.getElementById('q').addEventListener('input', () => {
 });
 
 /* ================= 底背离标的面板 ================= */
-let divRows = [];
+let divAll = [];        // 全部行(最近30个扫描日)
+let divFiltered = [];   // 筛选后的行
 let divRetryTimer = null;
 
 async function loadDivs() {
@@ -732,8 +733,7 @@ async function loadDivs() {
 }
 
 function renderDivs(d) {
-  const body = document.getElementById('divBody');
-  divRows = d.rows || [];
+  divAll = d.rows || [];
   const upd = document.getElementById('divUpd');
   let txt = '';
   if (d.scanning) {
@@ -746,11 +746,43 @@ function renderDivs(d) {
         { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) + ' 扫描';
   }
   upd.textContent = txt;
-  if (!divRows.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">${d.scanning ? '正在全市场扫描日线 / 周线底背离，约需15~30分钟…' : '暂无底背离标的'}</td></tr>`;
+  updateDivDateOptions();
+  applyDivFilters();
+}
+
+function updateDivDateOptions() {
+  const sel = document.getElementById('divDate');
+  const cur = sel.value;
+  const dates = [...new Set(divAll.map(r => r.scan))].sort().reverse();
+  sel.innerHTML = '<option value="">全部日期</option>' +
+      dates.map(dt => `<option value="${dt}">${dt}</option>`).join('');
+  if (dates.includes(cur)) sel.value = cur;   // 保持用户已选日期
+}
+
+function applyDivFilters() {
+  const q = document.getElementById('divQ').value.trim().toLowerCase();
+  const tf = document.getElementById('divTf').value;
+  const date = document.getElementById('divDate').value;
+  divFiltered = divAll.filter(r =>
+      (!tf || r.tf === tf) &&
+      (!date || r.scan === date) &&
+      (!q || r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q)));
+  renderDivTable();
+}
+
+function renderDivTable() {
+  const body = document.getElementById('divBody');
+  document.getElementById('divCount').textContent =
+      divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
+  if (!divAll.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">暂无底背离标的</td></tr>';
     return;
   }
-  body.innerHTML = divRows.map((r, i) => `
+  if (!divFiltered.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">无符合条件的标的</td></tr>';
+    return;
+  }
+  body.innerHTML = divFiltered.map((r, i) => `
     <tr class="div-row" onclick="viewDivIdx(${i})">
       <td class="di">${i + 1}</td>
       <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}</span></td>
@@ -759,11 +791,12 @@ function renderDivs(d) {
       <td class="dv">${r.price1.toFixed(2)} → ${r.price2.toFixed(2)}</td>
       <td class="dv">${r.dif1} → ${r.dif2}</td>
       <td class="dd">${r.confirm}</td>
+      <td class="dd">${r.scan}</td>
     </tr>`).join('');
 }
 
 function viewDivIdx(i) {
-  const r = divRows[i];
+  const r = divFiltered[i];
   if (!r) return;
   curEtf = r.code;   // 让日K/周K切换按钮作用于该标的
   document.getElementById('chName').textContent = r.name;

@@ -387,36 +387,80 @@ def _scan_one_divs(stock, now):
     return rows
 
 
+DIV_HIST_PATH = os.path.join(BASE, "div_hist.json")
+DIV_KEEP_DAYS = 30   # 滚动保留最近30个扫描日的底背离结果, 第31天淘汰第1天
+
+
+def _load_div_hist():
+    """读取按扫描日持久化的底背离历史, 只保留最近 DIV_KEEP_DAYS 个扫描日"""
+    days = load_json(DIV_HIST_PATH, {}).get("days", {})
+    if not isinstance(days, dict):
+        days = {}
+    for k in sorted(days)[:max(0, len(days) - DIV_KEEP_DAYS)]:
+        days.pop(k, None)
+    return days
+
+
+def _save_div_hist(days):
+    tmp = DIV_HIST_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": time.time(), "days": days}, f, ensure_ascii=False)
+    os.replace(tmp, DIV_HIST_PATH)
+
+
+def _flatten_div_hist(days):
+    """合并各扫描日的结果, 每行附带 scan=扫描日, 按确认日期倒序"""
+    rows = []
+    for d in days:
+        for r in days[d]:
+            rows.append({**r, "scan": d})
+    rows.sort(key=lambda r: (r["confirm"], r["code"]), reverse=True)
+    return rows
+
+
 def _div_scanner():
-    """后台线程: 每隔1天对全部A股的日线/周线底背离全量重扫一次"""
+    """后台线程: 每隔1天对全部A股的日线/周线底背离全量重扫一次。
+    结果按扫描日持久化(div_hist.json)滚动保留30天; 当日已扫过(含重启)直接用缓存不重扫"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     while True:
-        with DIV_LOCK:
-            DIV_SCAN.update(scanning=True, done=0, total=0)
-        rows = []
         try:
-            stocks = fetch_all_stocks()
-            now = now_cst()
+            days = _load_div_hist()
             with DIV_LOCK:
-                DIV_SCAN["total"] = len(stocks) * 2
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
-                for fu in as_completed(futs):
-                    try:
-                        rows.extend(fu.result())
-                    except Exception:
-                        pass
+                DIV_SCAN["rows"] = _flatten_div_hist(days)
+                DIV_SCAN["ts"] = load_json(DIV_HIST_PATH, {}).get("ts", 0)
+            today = time.strftime("%Y-%m-%d")
+            if today not in days:   # 今日未扫过才启动全量扫描
+                with DIV_LOCK:
+                    DIV_SCAN.update(scanning=True, done=0, total=0)
+                try:
+                    stocks = fetch_all_stocks()
+                    now = now_cst()
                     with DIV_LOCK:
-                        DIV_SCAN["done"] += 2
-            rows.sort(key=lambda r: (r["confirm"], r["code"]), reverse=True)
-            with DIV_LOCK:
-                DIV_SCAN["ts"] = time.time()
-                DIV_SCAN["rows"] = rows
+                        DIV_SCAN["total"] = len(stocks) * 2
+                    rows = []
+                    with ThreadPoolExecutor(max_workers=4) as ex:
+                        futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
+                        for fu in as_completed(futs):
+                            try:
+                                rows.extend(fu.result())
+                            except Exception:
+                                pass
+                            with DIV_LOCK:
+                                DIV_SCAN["done"] += 2
+                    days[today] = rows
+                    for k in sorted(days)[:max(0, len(days) - DIV_KEEP_DAYS)]:
+                        days.pop(k, None)   # 淘汰第31天以前的数据
+                    _save_div_hist(days)
+                except Exception:
+                    pass
+                finally:
+                    with DIV_LOCK:
+                        DIV_SCAN["scanning"] = False
+                with DIV_LOCK:
+                    DIV_SCAN["rows"] = _flatten_div_hist(days)
+                    DIV_SCAN["ts"] = time.time()
         except Exception:
             pass
-        finally:
-            with DIV_LOCK:
-                DIV_SCAN["scanning"] = False
         time.sleep(DIV_SCAN_INTERVAL)
 
 
