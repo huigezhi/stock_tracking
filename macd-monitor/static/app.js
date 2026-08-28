@@ -720,11 +720,71 @@ document.getElementById('q').addEventListener('input', () => {
   searchTimer = setTimeout(doSearch, 400);
 });
 
+/* ================= 底背离标的面板 ================= */
+let divRows = [];
+let divRetryTimer = null;
+
+async function loadDivs() {
+  try {
+    const r = await fetch('/api/divergences');
+    renderDivs(await r.json());
+  } catch (e) { /* 下轮重试 */ }
+}
+
+function renderDivs(d) {
+  const body = document.getElementById('divBody');
+  divRows = d.rows || [];
+  const upd = document.getElementById('divUpd');
+  upd.textContent = d.ts
+    ? new Date(d.ts * 1000).toLocaleString('zh-CN',
+        { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) + ' 扫描'
+    : '';
+  if (!divRows.length && d.scanning) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">正在扫描监控列表日线 / 周线…</td></tr>';
+    clearTimeout(divRetryTimer);
+    divRetryTimer = setTimeout(loadDivs, 20000);
+    return;
+  }
+  if (!divRows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">暂无底背离标的</td></tr>';
+    return;
+  }
+  body.innerHTML = divRows.map((r, i) => `
+    <tr class="div-row" onclick="viewDivIdx(${i})">
+      <td class="di">${i + 1}</td>
+      <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}${r.group ? ' · ' + esc(r.group) : ''}</span></td>
+      <td class="dtf">${r.tf_name}</td>
+      <td class="dd">${r.date1} → ${r.date2}</td>
+      <td class="dv">${r.price1.toFixed(2)} → ${r.price2.toFixed(2)}</td>
+      <td class="dv">${r.dif1} → ${r.dif2}</td>
+      <td class="dd">${r.confirm}</td>
+    </tr>`).join('');
+}
+
+function viewDivIdx(i) {
+  const r = divRows[i];
+  if (!r) return;
+  curEtf = r.code;   // 让日K/周K切换按钮作用于该标的
+  document.getElementById('chName').textContent = r.name;
+  document.getElementById('chCode').textContent = r.code;
+  document.getElementById('chIndex').textContent = r.group || '';
+  ['chPrice', 'chChg'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '--';
+    el.className = el.id;
+  });
+  document.getElementById('chAmount').textContent = '--';
+  document.getElementById('chShares').textContent = '--';
+  switchTf(r.tf);
+}
+
 KChart.init();
 ShareChart.init();
 window.__kchartReady = true;
 applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的绘制
 loadEtfList();
 loadWatch();
+loadDivs();
 setInterval(refreshQuotes, 5000);
 setInterval(loadEtfList, 60000);
+setInterval(loadDivs, 3600000);   // 每小时拉一次, 后端每日全量重扫

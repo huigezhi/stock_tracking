@@ -205,7 +205,9 @@ def detect_divergences(bars, dif, last_completed, pairs=1):
     lows, highs = find_dif_pivots(dif, last_completed)
     out = []
     for pivots, kind in ((lows, "bull"), (highs, "bear")):
-        for p1, p2 in zip(pivots[-pairs - 1:-1], pivots[-pairs:]):
+        # pairs 超过极值数时切片会被钳制到列表头, 导致自身配对, 故按实际数量封顶
+        n = min(pairs, len(pivots) - 1) if len(pivots) > 1 else 0
+        for p1, p2 in zip(pivots[-n - 1:-1], pivots[-n:]):
             if not (DIV_MIN_GAP <= p2 - p1 <= DIV_MAX_GAP):
                 continue
             c1, c2, d1, d2 = closes[p1], closes[p2], dif[p1], dif[p2]
