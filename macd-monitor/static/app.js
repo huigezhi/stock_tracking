@@ -96,6 +96,7 @@ function selectIdx(code) {
   }
   KChart.load(code, curTf);
   ShareChart.load(code, curTf);
+  renderWatchActive();
 }
 
 /* ================= 宽基ETF列表 ================= */
@@ -148,6 +149,7 @@ function selectEtf(code) {
   }
   KChart.load(code, curTf);
   ShareChart.load(code, curTf);
+  renderWatchActive();
 }
 
 /* ================= K线图 ================= */
@@ -635,9 +637,50 @@ const ShareChart = {
 };
 
 /* ================= MACD 监控列表 ================= */
+let watchData = [];   // 自选列表原始数据(名称/分组)
+let quoteMap = {};    // code -> 最新行情(点击自选时填充中栏头部)
+
+function renderWatchActive() {
+  document.querySelectorAll('.watch-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.code === curEtf));
+}
+
+function selectWatch(code) {
+  curEtf = code;
+  renderIdxList();
+  renderEtfList();
+  renderWatchActive();
+  const s = watchData.find(x => x.code === code);
+  if (s) {
+    document.getElementById('chName').textContent = s.name;
+    document.getElementById('chCode').textContent = s.code;
+    document.getElementById('chIndex').textContent = s.group || '自选';
+  }
+  const q = quoteMap[code];
+  const p = document.getElementById('chPrice');
+  const c = document.getElementById('chChg');
+  if (q && q.ok) {
+    p.textContent = q.price.toFixed(2);
+    p.className = 'ch-price ' + pctClass(q.chg_pct);
+    c.textContent = `${q.chg > 0 ? '+' : ''}${q.chg.toFixed(2)}  ${fmtPct(q.chg_pct)}`;
+    c.className = 'ch-chg ' + pctClass(q.chg_pct);
+    document.getElementById('chAmount').textContent = (q.amount / 1e4).toFixed(2) + '亿';
+  } else {
+    p.textContent = '--';
+    p.className = 'ch-price';
+    c.textContent = '';
+    c.className = 'ch-chg';
+    document.getElementById('chAmount').textContent = '--';
+  }
+  document.getElementById('chShares').textContent = '--';
+  KChart.load(code, curTf);
+  ShareChart.load(code, curTf);
+}
+
 async function loadWatch() {
   const r = await fetch('/api/stocks');
   const stocks = await r.json();
+  watchData = stocks;
   groups = [...new Set(stocks.map(s => s.group || '自选'))];
   document.getElementById('count').textContent = stocks.length;
   const box = document.getElementById('watch');
@@ -646,7 +689,7 @@ async function loadWatch() {
     return;
   }
   box.innerHTML = stocks.map((s, i) => `
-    <div class="watch-item" data-code="${esc(s.code)}">
+    <div class="watch-item ${curEtf === s.code ? 'active' : ''}" data-code="${esc(s.code)}" onclick="selectWatch('${esc(s.code)}')">
       <span class="seq">${i + 1}</span>
       <span class="wname"><span class="n">${esc(s.name)}</span><span class="c">${esc(s.code)}</span></span>
       <span class="grp">${esc(s.group || '自选')}</span>
@@ -654,7 +697,7 @@ async function loadWatch() {
       <span class="qcell qprice"><span class="p">--</span><span class="u">--</span></span>
       <span class="qcell qpct">--</span>
       <span class="qcell qflow"><span class="v">--</span><span class="l">--</span></span>
-      <button class="del" onclick="delStock('${esc(s.code)}')">删除</button>
+      <button class="del" onclick="event.stopPropagation();delStock('${esc(s.code)}')">删除</button>
     </div>`).join('');
   refreshQuotes();
 }
@@ -666,6 +709,7 @@ async function refreshQuotes() {
     document.getElementById('upd').textContent =
       '更新 ' + new Date().toTimeString().slice(0, 5);
     for (const q of data) {
+      quoteMap[q.code] = q;
       const row = document.querySelector(`.watch-item[data-code="${CSS.escape(q.code)}"]`);
       if (!row) continue;
       const priceEl = row.querySelector('.qprice .p');

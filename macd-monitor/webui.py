@@ -410,6 +410,27 @@ def get_kline_cached(code, tf="day", n=800):
         return list(entry.get("bars", []))[-n:]
 
 
+def _watch_codes():
+    """自选/监控列表的代码集合(这些标的的K线也走本地缓存)"""
+    with CFG_LOCK:
+        return {s.get("code", "") for s in load_cfg().get("stocks", [])}
+
+
+def _drop_kline_cache(code):
+    """从K线缓存中删除指定标的并落盘(删除自选时同步清理缓存)"""
+    with KLINE_LOCK:
+        if not _KC["loaded"]:
+            _KC["data"] = load_json(KLINE_CACHE_PATH, {})
+            _KC["loaded"] = True
+        if code not in _KC["data"]:
+            return
+        del _KC["data"][code]
+        tmp = KLINE_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_KC["data"], f, ensure_ascii=False)
+        os.replace(tmp, KLINE_CACHE_PATH)
+
+
 def get_etf_share_history(code, tf="day"):
     """ETF份额历史(亿份): [[date, shares], ...]; tf=week 时按ISO周聚合, 取每周最后快照"""
     with SHARE_LOCK:
@@ -709,8 +730,8 @@ class Handler(BaseHTTPRequestHandler):
             code = q.get("code", [""])[0]
             tf = q.get("tf", ["day"])[0]
             n = q.get("n", ["800"])[0]
-            # 左栏指数/宽基ETF走本地缓存(增量更新), 其余标的直接实时拉取
-            if code in CACHED_KLINE_CODES:
+            # 左栏指数/宽基ETF及自选股走本地缓存(增量更新), 其余标的直接实时拉取
+            if code in CACHED_KLINE_CODES or code in _watch_codes():
                 self._json(get_kline_cached(code, tf, n))
             else:
                 self._json(fetch_kline(code, tf, n))
@@ -753,6 +774,9 @@ class Handler(BaseHTTPRequestHandler):
             stocks = cfg.get("stocks", [])
             cfg["stocks"] = [s for s in stocks if s.get("code") != code]
             save_cfg(cfg)
+        # 删除自选时同步清理其K线缓存(指数/宽基ETF等固定标的除外)
+        if code not in CACHED_KLINE_CODES:
+            _drop_kline_cache(code)
         self._json({"ok": True})
 
 
