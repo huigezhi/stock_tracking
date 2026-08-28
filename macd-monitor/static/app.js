@@ -72,7 +72,6 @@ function renderIdxList() {
     <div class="etf-item ${curEtf === i.code ? 'active' : ''}" onclick="selectIdx('${i.code}')">
       <span class="en">${esc(i.name)}</span>
       <span class="ep ${pctClass(i.chg_pct)}">${i.price.toFixed(2)}</span>
-      <span class="ec">${i.code}</span>
       <span class="epct ${pctClass(i.chg_pct)}">${fmtPct(i.chg_pct)}</span>
     </div>`).join('');
 }

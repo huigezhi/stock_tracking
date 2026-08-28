@@ -49,12 +49,12 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 
 /* ---------- 左栏: 宽基ETF列表 ---------- */
 .etf-panel { overflow: hidden; }
-/* 指数区: 固定内容高度, 不参与滚动 */
+/* 指数区: 固定内容高度, 不参与滚动; 单行三列: 名称+价格+涨幅 */
 .idx-sec .etf-list { max-height: none; overflow-y: visible; }
-.idx-sec .etf-item { padding: 5px 10px; }
+.idx-sec .etf-item { grid-template-columns: 1fr auto auto; padding: 5px 10px; }
 .idx-sec .etf-item .en { font-size: 12.5px; }
 .idx-sec .etf-item .ep { font-size: 12px; }
-.idx-sec .etf-item .ec { display: none; }
+.idx-sec .etf-item .epct { font-size: 11px; }
 .panel-head { display: flex; align-items: baseline; justify-content: space-between;
               padding: 12px 14px 8px; }
 .panel-head h2 { font-size: 14px; color: var(--text); }
