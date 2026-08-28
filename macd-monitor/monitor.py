@@ -260,6 +260,83 @@ def fmt_label(tf, label):
     return label
 
 
+# ---------------- 多周期共振 ----------------
+# 同一标的在多个周期上同向信号叠加(如60分钟金叉+日线底背离+周线金叉),
+# 比单周期信号可靠得多。每周期取回看窗口内"最近一个信号"(交叉或背离)。
+RESONANCE_LOOKBACK = {"1m": 30, "5m": 24, "30m": 8, "60m": 8, "day": 5, "week": 3}
+TF_ORDER = {tf: i for i, tf in enumerate(("1m", "5m", "30m", "60m", "day", "week"))}
+
+
+def recent_tf_signals(tf, bars, dif, dea, last_completed):
+    """该周期回看窗口内最近的一个信号(交叉或背离), 无则返回 None。
+    返回 {"dir","word","ago","label"}; ago=距最后一根已收盘K线的根数"""
+    look = RESONANCE_LOOKBACK.get(tf, 8)
+    best = None
+    for i in range(last_completed, max(0, last_completed - look), -1):
+        cross = detect_cross(dif, dea, i)
+        if cross:
+            bull = cross == "golden"
+            best = {"dir": "bull" if bull else "bear",
+                    "word": "金叉" if bull else "死叉",
+                    "ago": last_completed - i, "label": bars[i][0]}
+            break
+    for dv in detect_divergences(bars, dif, last_completed, pairs=3):
+        ago = last_completed - dv["confirm"]
+        if ago < look and (best is None or ago < best["ago"]):
+            bull = dv["div"] == "bull"
+            best = {"dir": "bull" if bull else "bear",
+                    "word": "底背离" if bull else "顶背离",
+                    "ago": ago, "label": bars[dv["confirm"]][0]}
+    return best
+
+
+def combine_resonance(sigs_by_tf):
+    """按方向聚合各周期信号: {"bull": {tf: sig}, "bear": {tf: sig}}"""
+    out = {"bull": {}, "bear": {}}
+    for tf, sig in (sigs_by_tf or {}).items():
+        if sig:
+            out[sig["dir"]][tf] = sig
+    return out
+
+
+def scan_resonance(code, name, group, sigs_by_tf, last_close, state, cfg, now):
+    """检测一只标的的多周期共振, 返回新出现的共振提醒列表。
+    去重: state['resonance'] 记录已提醒过的周期组合, 同一组合只提醒一次;
+    组合升级(双周期→三周期)视为新共振会再次提醒; 周期退出后旧组合失效,
+    之后重新聚齐会再次提醒。"""
+    rcfg = cfg.get("resonance") or {}
+    if rcfg.get("enable") is False:
+        return []
+    min_tfs = int(rcfg.get("min_tfs", 2) or 2)
+    res = combine_resonance(sigs_by_tf)
+    seen = state.setdefault("resonance", {})
+    out = []
+    for d in ("bull", "bear"):
+        cur = set(res[d])
+        prefix = f"{code}|{d}|"
+        # 清理已失效的历史组合(不再是当前周期集合的子集)
+        for k in [k for k in seen if k.startswith(prefix)
+                  and not set(k[len(prefix):].split("+")) <= cur]:
+            seen.pop(k, None)
+        if len(cur) < min_tfs:
+            continue
+        tfs = sorted(cur, key=lambda t: TF_ORDER.get(t, 99))
+        key = prefix + "+".join(tfs)
+        if key in seen:
+            continue
+        seen[key] = now.strftime("%Y-%m-%d %H:%M")
+        out.append({
+            "kind": "resonance", "dir": d, "code": code, "name": name,
+            "group": group, "tfs": tfs,
+            "sigs": {t: res[d][t] for t in tfs},
+            "close": last_close or 0.0,
+            "label": now.strftime("%Y-%m-%d %H:%M"),
+        })
+    while len(seen) > STATE_LIMIT:
+        seen.pop(next(iter(seen)))
+    return out
+
+
 # ---------------- 飞书推送 ----------------
 
 def feishu_sign(secret, ts):
@@ -269,6 +346,8 @@ def feishu_sign(secret, ts):
 
 def sig_word(a):
     """信号中文名"""
+    if a.get("kind") == "resonance":
+        return "多周期共振"
     if a.get("kind") == "div":
         return "底背离" if a["div"] == "bull" else "顶背离"
     return "金叉" if a["cross"] == "golden" else "死叉"
@@ -276,12 +355,21 @@ def sig_word(a):
 
 def sig_dir(a):
     """信号方向: bull 看涨 / bear 看跌"""
+    if a.get("kind") == "resonance":
+        return a["dir"]
     if a.get("kind") == "div":
         return a["div"]
     return "bull" if a["cross"] == "golden" else "bear"
 
 
 def fmt_alert_line(a):
+    if a.get("kind") == "resonance":
+        d = "看涨" if a["dir"] == "bull" else "看跌"
+        det = " ".join(f'{TF_NAME[t]}{a["sigs"][t]["word"]}({a["sigs"][t]["ago"]}根前)'
+                       for t in a["tfs"])
+        return (f'{a["name"]}({a["code"]})[{a["group"]}] 多周期共振[{d}] '
+                f'{"+".join(TF_NAME[t] for t in a["tfs"])} '
+                f'现价{a["close"]:.2f} {det}')
     if a.get("kind") == "div":
         bull = a["div"] == "bull"
         w = "底背离" if bull else "顶背离"
@@ -354,6 +442,47 @@ def send_feishu_card(cfg, alerts):
             "elements": elements,
         },
     }
+    _post_card(cfg, payload, len(alerts))
+
+
+def send_feishu_resonance(cfg, alerts):
+    """多周期共振提醒: 独立高优卡片(与常规信号分开发送, 便于置顶关注)"""
+    url = str(cfg.get("webhook_url", "")).strip()
+    if not url:
+        for a in alerts:
+            log.info("[未配置webhook,仅控制台] %s", fmt_alert_line(a))
+        return
+    elements = []
+    for a in alerts:
+        bull = a["dir"] == "bull"
+        emoji = "🚀" if bull else "🧨"
+        det = "\n".join(
+            f'- {TF_NAME[t]}　{a["sigs"][t]["word"]}　'
+            f'{a["sigs"][t]["ago"]}根K线前 @{fmt_label(t, a["sigs"][t]["label"])}'
+            for t in a["tfs"])
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content":
+                     f'{emoji} **{a["name"]}**（{a["code"]}）[{a["group"]}]　'
+                     f'**{len(a["tfs"])}周期{"看涨" if bull else "看跌"}共振**\n'
+                     f'{det}\n现价：{a["close"]:.2f}'},
+        })
+    payload = {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {"template": "green" if sig_dir(alerts[0]) == "bull" else "red",
+                       "title": {"tag": "plain_text",
+                                 "content": f"🔥 MACD 多周期共振提醒（{len(alerts)}条）"}},
+            "elements": elements,
+        },
+    }
+    _post_card(cfg, payload, len(alerts))
+
+
+def _post_card(cfg, payload, n):
+    """卡片统一发送入口: 附加签名并POST, 记录结果日志"""
+    url = str(cfg.get("webhook_url", "")).strip()
     secret = str(cfg.get("webhook_secret", "")).strip()
     if secret:
         ts = str(int(time.time()))
@@ -363,7 +492,7 @@ def send_feishu_card(cfg, alerts):
         r = S.post(url, json=payload, timeout=10)
         res = r.json()
         if res.get("code") == 0 or res.get("StatusCode") == 0:
-            log.info("飞书推送成功: %d 条信号", len(alerts))
+            log.info("飞书推送成功: %d 条信号", n)
         else:
             log.error("飞书推送失败: %s", res)
     except Exception as e:
@@ -439,6 +568,8 @@ def scan(cfg, state, now):
         code = norm_code(stock["code"])
         name = stock.get("name", code)
         group = stock.get("group", "自选")
+        res_sigs = {}       # 该标的各周期最近信号(多周期共振用)
+        res_close = None    # 现价(优先取日线最后一根收盘)
         for tf in cfg.get("timeframes", []):
             bars = fetch_klines(code, tf, MIN_COUNT if tf in TF_MIN else DAYW_COUNT)
             if len(bars) < MIN_BARS:
@@ -487,7 +618,14 @@ def scan(cfg, state, now):
                     "p1": bars[dv["p1"]][0], "p2": bars[dv["p2"]][0],
                     "c1": dv["c1"], "c2": dv["c2"], "d1": dv["d1"], "d2": dv["d2"],
                 })
+            # ---- 共振: 记录该周期回看窗口内的最近信号(复用已拉的bars) ----
+            res_sigs[tf] = recent_tf_signals(tf, bars, dif, dea, last_completed)
+            if closes and (tf == "day" or res_close is None):
+                res_close = closes[-1]
             time.sleep(0.1)
+        # ---- 多周期共振(该标的全部周期扫完后再判定) ----
+        alerts.extend(scan_resonance(code, name, group, res_sigs,
+                                      res_close, state, cfg, now))
         if code not in primed_stocks:
             primed_stocks.append(code)
     if skipped:
@@ -571,7 +709,12 @@ def main():
         if alerts:
             for a in alerts:
                 print(fmt_alert_line(a))
-            send_feishu(cfg, alerts)
+            res_alerts = [a for a in alerts if a.get("kind") == "resonance"]
+            plain = [a for a in alerts if a.get("kind") != "resonance"]
+            if plain:
+                send_feishu(cfg, plain)
+            if res_alerts:
+                send_feishu_resonance(cfg, res_alerts)
         else:
             print("无新信号")
         return
@@ -602,8 +745,13 @@ def main():
                     for a in alerts:
                         log.info("信号: %s", fmt_alert_line(a))
                     if trading:
-                        # 交易时段: 即时推送
-                        send_feishu(cfg, alerts)
+                        # 交易时段: 即时推送(共振走独立高优卡片, 常规信号走普通卡片)
+                        res_alerts = [a for a in alerts if a.get("kind") == "resonance"]
+                        plain = [a for a in alerts if a.get("kind") != "resonance"]
+                        if plain:
+                            send_feishu(cfg, plain)
+                        if res_alerts:
+                            send_feishu_resonance(cfg, res_alerts)
                     else:
                         # 非交易时段/非交易日: 信号仅入库记录, 不推送
                         log.info("非交易时段, %d条信号仅记录不推送", len(alerts))

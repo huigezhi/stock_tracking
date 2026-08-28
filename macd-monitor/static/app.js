@@ -51,7 +51,7 @@ async function submitLogin() {
     localStorage.setItem('auth_token', token);
     document.getElementById('loginBox').style.display = 'none';
     // 重新拉取所有数据(loadWatch内部会重建SSE连接)
-    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); refreshQuotes();
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); loadResonance(); refreshQuotes();
   } catch (e) {
     err.textContent = '网络错误, 请重试';
   }
@@ -847,6 +847,7 @@ async function loadWatch() {
     </div>`).join('');
   refreshQuotes();
   updateIntradayBadges();
+  updateResBadges();
   ensureSSE();   // 自选变化后重连SSE(订阅代码集已变)
 }
 
@@ -950,6 +951,8 @@ function handleSSE(ev) {
     toast('底背离全市场扫描完成');
   } else if (ev.type === 'intraday') {
     setIntraday(ev.data || []);
+  } else if (ev.type === 'resonance') {
+    setResonance(ev.data || []);
   }
 }
 
@@ -1024,6 +1027,51 @@ function updateIntradayBadges() {
       }
       b.title = `60分钟底背离预览: 价格${r.price1.toFixed(2)}→${r.price2.toFixed(2)} ` +
         `DIF ${r.dif1}→${r.dif2}(未收盘确认)`;
+    } else if (b) {
+      b.remove();
+    }
+  });
+}
+
+/* ================= 多周期共振徽章(60分/日/周) ================= */
+const TF_CN = {'60m': '60分钟', 'day': '日线', 'week': '周线'};
+let resMap = {};   // code -> 共振行
+
+function setResonance(rows) {
+  const prevKeys = Object.keys(resMap);
+  resMap = {};
+  rows.forEach(r => { resMap[r.code] = r; });
+  updateResBadges();
+  const fresh = Object.keys(resMap).filter(k => !prevKeys.includes(k));
+  if (fresh.length) {
+    const names = fresh.slice(0, 3).map(k => `${resMap[k].name}(${resMap[k].tfs.map(t => TF_CN[t]).join('+')})`).join('、');
+    toast(`多周期共振: ${names}${fresh.length > 3 ? ' 等' : ''}`);
+  }
+}
+
+async function loadResonance() {
+  try {
+    const r = await apiFetch('/api/resonance');
+    const d = await r.json();
+    setResonance(d.rows || []);
+  } catch (e) { /* 下轮重试 */ }
+}
+
+function updateResBadges() {
+  document.querySelectorAll('.watch-item').forEach(el => {
+    const r = resMap[el.dataset.code];
+    let b = el.querySelector('.res-badge');
+    if (r) {
+      if (!b) {
+        b = document.createElement('span');
+        b.className = 'res-badge';
+        el.querySelector('.wname').appendChild(b);
+      }
+      b.textContent = `${r.dir === 'bull' ? '↑' : '↓'}${r.tfs.length}周期共振`;
+      b.classList.toggle('up', r.dir === 'bull');
+      b.classList.toggle('down', r.dir === 'bear');
+      b.title = r.detail.map(x =>
+        `${TF_CN[x.tf] || x.tf} ${x.word}(${x.ago}根K线前, ${x.label})`).join('\n');
     } else if (b) {
       b.remove();
     }
@@ -1310,9 +1358,9 @@ applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的�
     });
     const st = await r.json();
     if (st.enabled && !st.ok) showLogin(true);
-    else { loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); }
+    else { loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); loadResonance(); }
   } catch (e) {
-    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday();
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); loadResonance();
   }
 })();
 /* SSE连接时行情实时推送, 断开时回退5秒轮询; 低频轮询兜底主力资金流等SSE未覆盖字段 */
@@ -1320,4 +1368,5 @@ setInterval(() => { if (!sseOk) refreshQuotes(); }, 5000);
 setInterval(refreshQuotes, 120000);
 setInterval(loadIdxList, 60000);
 setInterval(loadEtfList, 60000);
+setInterval(loadResonance, 300000);   // 共振快照5分钟兜底(SSE断开时也能更新)
 setInterval(loadDivs, 3600000);   // 每小时拉一次, 后端每日全量重扫

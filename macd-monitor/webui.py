@@ -22,8 +22,9 @@ from urllib.parse import urlparse, parse_qs, quote
 import requests
 
 # 复用监控进程的 MACD/背离检测逻辑, 保证面板与推送口径一致
-from monitor import (bar_complete, detect_divergences, fetch_klines,
-                     is_trading_time, now_cst, send_feishu_text)
+from monitor import (bar_complete, combine_resonance, detect_divergences,
+                     fetch_klines, is_trading_time, now_cst,
+                     recent_tf_signals, send_feishu_text)
 from monitor import macd as calc_macd
 import db
 import net
@@ -297,20 +298,25 @@ INTRADAY_ROWS = []        # 最近一轮扫描到的预览信号(前端初始加
 INTRADAY_PUSHED = {}      # (code, date2) -> 上次推送日, 飞书去重
 
 
-def _intraday_scan_one(code, name, now):
-    """单只自选股的60分钟线底背离预览, 返回信号行列表"""
+def _intraday_bars60(code, now):
+    """拉取并修剪自选股的已收盘60分钟K线, 不足返回 None"""
     try:
         rows = fetch_klines(code, INTRADAY_TF, 320)
     except Exception:
-        return []
+        return None
     if len(rows) < 120:   # 60根窗口 + 极值确认窗口 + MACD预热下限
-        return []
+        return None
     last = len(rows) - 1
     if not bar_complete(INTRADAY_TF, rows[last][0], now):   # 剔除未收盘K线
         last -= 1
     if last < 120:
-        return []
-    bars = rows[:last + 1]
+        return None
+    return rows[:last + 1]
+
+
+def _intraday_divs(code, name, bars):
+    """基于已收盘60分钟线的底背离预览信号行"""
+    last = len(bars) - 1
     closes = [c for _, c in bars]
     dif, _, _ = calc_macd(closes)
     out = []
@@ -329,50 +335,143 @@ def _intraday_scan_one(code, name, now):
 
 
 def _intraday_scanner():
-    """后台线程: 交易时段定期扫描自选股60分钟线底背离, SSE推送 + 飞书低优先级通知"""
+    """后台线程: 交易时段定期扫描自选股60分钟线底背离 + 多周期共振,
+    SSE推送 + 飞书低优先级通知; 非交易时段低频维持共振快照"""
     while True:
         try:
             now = now_cst()
             if is_trading_time(now):
-                today = now.strftime("%Y-%m-%d")
-                with CFG_LOCK:
-                    stocks = load_cfg().get("stocks", [])
-                fresh, alerts = [], []
-                for s in stocks:
-                    rows = _intraday_scan_one(s.get("code", ""),
-                                              s.get("name", ""), now)
-                    if not rows:
-                        continue
-                    fresh.extend(rows)
-                    for r in rows:
-                        key = (r["code"], r["date2"])
-                        if INTRADAY_PUSHED.get(key) != today:
-                            INTRADAY_PUSHED[key] = today
-                            alerts.append(r)
-                if len(INTRADAY_PUSHED) > 500:   # 防止长期运行无限膨胀
-                    for k in list(INTRADAY_PUSHED)[:250]:
-                        INTRADAY_PUSHED.pop(k, None)
-                if alerts:
-                    lines = [
-                        f'[盘中预览] {r["name"]}({r["code"]}) 60分钟底背离 '
-                        f'价格{r["price1"]:.2f}→{r["price2"]:.2f} '
-                        f'DIF{r["dif1"]:.3f}→{r["dif2"]:.3f}(未收盘确认)'
-                        for r in alerts]
-                    try:
-                        with CFG_LOCK:
-                            cfg = load_cfg()
-                        send_feishu_text(cfg, "[MACD盘中预览·低优先级]\n" + "\n".join(lines))
-                    except Exception:
-                        pass
-                with INTRADAY_LOCK:
-                    INTRADAY_ROWS[:] = fresh
-                if fresh:
-                    _hub_push({"type": "intraday", "data": fresh})
+                _intraday_round(now)
                 time.sleep(INTRADAY_SEC)
             else:
-                time.sleep(60)   # 非交易时段低频待机
+                # 非交易时段: 数据收盘后不变, 共振快照2小时校准一次
+                if time.time() - RESONANCE_TS > RESONANCE_IDLE_SEC:
+                    _resonance_round(now)
+                time.sleep(60)
         except Exception:
             time.sleep(120)
+
+
+def _intraday_round(now):
+    """一轮盘中扫描: 60分钟背离预览(拉一次60m数据, 共振计算复用)"""
+    today = now.strftime("%Y-%m-%d")
+    with CFG_LOCK:
+        stocks = load_cfg().get("stocks", [])
+    fresh, alerts, res_rows = [], [], []
+    for s in stocks:
+        code, name = s.get("code", ""), s.get("name", "")
+        bars60 = _intraday_bars60(code, now)
+        if bars60 is not None:
+            for r in _intraday_divs(code, name, bars60):
+                fresh.append(r)
+                key = (r["code"], r["date2"])
+                if INTRADAY_PUSHED.get(key) != today:
+                    INTRADAY_PUSHED[key] = today
+                    alerts.append(r)
+        res_rows.extend(_resonance_one(code, name, now, bars60))
+    if len(INTRADAY_PUSHED) > 500:   # 防止长期运行无限膨胀
+        for k in list(INTRADAY_PUSHED)[:250]:
+            INTRADAY_PUSHED.pop(k, None)
+    if alerts:
+        lines = [
+            f'[盘中预览] {r["name"]}({r["code"]}) 60分钟底背离 '
+            f'价格{r["price1"]:.2f}→{r["price2"]:.2f} '
+            f'DIF{r["dif1"]:.3f}→{r["dif2"]:.3f}(未收盘确认)'
+            for r in alerts]
+        try:
+            with CFG_LOCK:
+                cfg = load_cfg()
+            send_feishu_text(cfg, "[MACD盘中预览·低优先级]\n" + "\n".join(lines))
+        except Exception:
+            pass
+    with INTRADAY_LOCK:
+        INTRADAY_ROWS[:] = fresh
+    if fresh:
+        _hub_push({"type": "intraday", "data": fresh})
+    _set_resonance(res_rows)
+
+
+# ---------------- 多周期共振(60分/日/周) ----------------
+# 与 monitor.py 的全周期共振同一套算法(recent_tf_signals/combine_resonance),
+# Web侧只覆盖 60分钟/日线/周线 三个慢周期(日/周走本地缓存不额外出网,
+# 60m复用盘中线程已拉取的数据), 结果经SSE推送, 前端在自选行展示共振徽章。
+# 飞书共振高优推送由 monitor.py 进程负责(覆盖全部已配置周期)
+
+RESONANCE_LOCK = threading.Lock()
+RESONANCE_ROWS = []        # 当前共振快照 [{code,name,dir,tfs,detail,close}]
+RESONANCE_TS = 0.0         # 上次刷新时间戳
+RESONANCE_IDLE_SEC = 7200  # 非交易时段刷新间隔(2小时)
+
+
+def _resonance_one(code, name, now, bars60=None):
+    """单只标的 60m/日/周 三周期共振检测, 返回共振行列表"""
+    if not code:
+        return []
+    sigs = {}
+    last_close = None
+    # 60分钟线(优先复用盘中线程已拉取的已收盘数据)
+    if bars60 is None:
+        bars60 = _intraday_bars60(code, now)
+    if bars60:
+        closes = [c for _, c in bars60]
+        dif, dea, _ = calc_macd(closes)
+        sigs["60m"] = recent_tf_signals("60m", bars60, dif, dea, len(bars60) - 1)
+        last_close = closes[-1]
+    # 日线/周线(本地缓存, 不额外请求分钟线数据源)
+    for tf in ("day", "week"):
+        try:
+            bars = get_kline_cached(code, tf, 400)
+        except Exception:
+            continue
+        if not bars or len(bars) < 60:
+            continue
+        last = len(bars) - 1
+        if not bar_complete(tf, bars[last][0], now):   # 剔除未收盘K线
+            last -= 1
+        if last < 60:
+            continue
+        bars2 = bars[:last + 1]
+        closes = [c for _, c in bars2]
+        dif, dea, _ = calc_macd(closes)
+        sigs[tf] = recent_tf_signals(tf, bars2, dif, dea, last)
+        if tf == "day":
+            last_close = closes[-1]
+    if last_close is None:
+        return []
+    order = {"60m": 0, "day": 1, "week": 2}
+    rows = []
+    for d in ("bull", "bear"):
+        tfs = combine_resonance(sigs)[d]
+        if len(tfs) < 2:
+            continue
+        ordered = sorted(tfs, key=lambda t: order.get(t, 9))
+        rows.append({
+            "code": code, "name": name, "dir": d, "tfs": ordered,
+            "detail": [{"tf": t, "word": tfs[t]["word"], "ago": tfs[t]["ago"],
+                        "label": tfs[t]["label"]} for t in ordered],
+            "close": last_close, "updated": now.strftime("%Y-%m-%d %H:%M"),
+        })
+    return rows
+
+
+def _resonance_round(now):
+    """非交易时段的共振快照刷新(日线/周线/60m收盘后均不变, 低频校准)"""
+    with CFG_LOCK:
+        stocks = load_cfg().get("stocks", [])
+    rows = []
+    for s in stocks:
+        rows.extend(_resonance_one(s.get("code", ""), s.get("name", ""), now))
+    _set_resonance(rows)
+
+
+def _set_resonance(rows):
+    """更新共振快照并SSE广播(前端按 code+dir 去重提示新共振)"""
+    global RESONANCE_TS
+    with RESONANCE_LOCK:
+        RESONANCE_ROWS[:] = rows
+        RESONANCE_TS = time.time()
+    if rows:
+        _hub_push({"type": "resonance", "data": rows})
 
 
 # ---------------- 宽基ETF列表 ----------------
@@ -1126,6 +1225,10 @@ class Handler(BaseHTTPRequestHandler):
             # 盘中60分钟底背离预览信号(自选股, 前端初始加载; 之后走SSE)
             with INTRADAY_LOCK:
                 self._json({"rows": list(INTRADAY_ROWS)})
+        elif u.path == "/api/resonance":
+            # 多周期共振快照(60分/日/周, 前端初始加载; 之后走SSE)
+            with RESONANCE_LOCK:
+                self._json({"rows": list(RESONANCE_ROWS), "ts": RESONANCE_TS})
         elif u.path == "/api/health":
             # 健康检查: 数据源状态/扫描状态/订阅数
             with DIV_LOCK:
@@ -1140,8 +1243,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             with INTRADAY_LOCK:
                 n_intraday = len(INTRADAY_ROWS)
+            with RESONANCE_LOCK:
+                n_res = len(RESONANCE_ROWS)
             self._json({"ok": True, "sources": net.health(), "scan": scan,
                         "sse_subs": nsubs, "kline_bars": kc, "intraday": n_intraday,
+                        "resonance": n_res,
                         "db_signals": len(db.div_rows(3650))})
         elif u.path == "/api/stream":
             self._handle_stream(parse_qs(u.query).get("codes", [""])[0])

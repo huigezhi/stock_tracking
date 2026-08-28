@@ -9,6 +9,10 @@
   "feishu_log_level": "WARNING",
   "feishu_status_interval_min": 30,
   "timeframes": ["1m", "5m", "30m", "60m", "day", "week"],
+  "resonance": {
+    "enable": true,
+    "min_tfs": 2
+  },
   "stocks": [
     { "code": "sh600519", "name": "贵州茅台", "group": "持仓" },
     { "code": "sz300750", "name": "宁德时代", "group": "持仓" },
