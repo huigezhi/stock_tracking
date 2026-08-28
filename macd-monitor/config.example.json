@@ -1,6 +1,9 @@
 {
   "webhook_url": "",
   "webhook_secret": "",
+  "webui": {
+    "auth_token": ""
+  },
   "poll_interval_sec": 30,
   "signal_on_forming_bar": false,
   "feishu_log_level": "WARNING",

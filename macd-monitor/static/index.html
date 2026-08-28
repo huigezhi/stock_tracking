@@ -126,6 +126,15 @@
   </aside>
 </main>
 <div class="toast" id="toast"></div>
+<div class="login-mask" id="loginBox" style="display:none">
+  <div class="login-card">
+    <div class="login-title">访问认证</div>
+    <input type="password" id="loginInput" placeholder="请输入访问令牌"
+           onkeydown="if(event.key==='Enter')submitLogin()">
+    <div class="login-err" id="loginErr"></div>
+    <button onclick="submitLogin()">进入</button>
+  </div>
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>

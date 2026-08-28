@@ -662,10 +662,68 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
         ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
         ".ico": "image/x-icon"}
 
+# ---------------- Web UI 访问认证 ----------------
+# config.json: webui.auth_token 非空时启用, 所有 /api/* 需携带
+# Authorization: Bearer <token> 或 ?token=<token>; 静态文件放行(登录页需要)
+# 同 IP 连续失败5次锁定60秒
+
+AUTH_FAIL_LIMIT = 5
+AUTH_LOCK_SEC = 60
+_AUTH_FAILS = {}   # ip -> (失败次数, 锁定截止时间戳)
+_AUTH_LOCK = threading.Lock()
+
+
+def _auth_token():
+    with CFG_LOCK:
+        return (load_cfg().get("webui") or {}).get("auth_token", "") or ""
+
+
+def _auth_check(handler, count_fail=True):
+    """返回 None 表示通过; 否则返回剩余锁定秒数(>0)或 -1(仅校验失败)
+    count_fail=False 用于状态探测, 不累计失败次数"""
+    if not _auth_token():
+        return None   # 未配置token, 不启用认证
+    token = ""
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = parse_qs(urlparse(handler.path).query).get("token", [""])[0]
+    ip = handler.client_address[0]
+    now_ts = time.time()
+    with _AUTH_LOCK:
+        fails, lock_until = _AUTH_FAILS.get(ip, (0, 0))
+        if now_ts < lock_until:
+            return int(lock_until - now_ts) + 1
+    if token and token == _auth_token():
+        with _AUTH_LOCK:
+            _AUTH_FAILS.pop(ip, None)
+        return None
+    if not count_fail:
+        return -1
+    with _AUTH_LOCK:
+        fails, lock_until = _AUTH_FAILS.get(ip, (0, 0))
+        if now_ts >= lock_until:
+            fails = 0
+        fails += 1
+        _AUTH_FAILS[ip] = (fails, now_ts + AUTH_LOCK_SEC if fails >= AUTH_FAIL_LIMIT else lock_until)
+    return -1
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
+
+    def _auth_guard(self):
+        """API 访问守卫: 通过返回 True; 已拒绝(已发送401/423响应)返回 False"""
+        r = _auth_check(self)
+        if r is None:
+            return True
+        if r > 0:
+            self._json({"ok": False, "msg": f"尝试次数过多, 请{r}秒后重试", "auth": "locked"}, 423)
+        else:
+            self._json({"ok": False, "msg": "未授权访问", "auth": "unauthorized"}, 401)
+        return False
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -696,6 +754,14 @@ class Handler(BaseHTTPRequestHandler):
             self._file("index.html")
         elif u.path.startswith("/static/"):
             self._file(u.path[len("/static/"):])
+        elif u.path == "/api/auth/status":
+            # 前端探测认证状态: 是否启用/当前是否已通过(不计失败次数)
+            r = _auth_check(self, count_fail=False)
+            self._json({"enabled": bool(_auth_token()),
+                        "ok": r is None,
+                        "locked": r if (r is not None and r > 0) else 0})
+        elif not self._auth_guard():
+            return
         elif u.path == "/api/stocks":
             with CFG_LOCK:
                 stocks = load_cfg().get("stocks", [])
@@ -743,6 +809,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path != "/api/stocks":
             self.send_error(404)
             return
+        if not self._auth_guard():
+            return
         length = int(self.headers.get("Content-Length", 0))
         try:
             data = json.loads(self.rfile.read(length))
@@ -767,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path != "/api/stocks":
             self.send_error(404)
+            return
+        if not self._auth_guard():
             return
         code = parse_qs(u.query).get("code", [""])[0]
         with CFG_LOCK:

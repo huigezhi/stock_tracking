@@ -5,6 +5,58 @@ let groups = [];
 let searchTimer = null;
 
 /* ================= 通用 ================= */
+/* 认证: 所有 /api/* 请求自动携带 Bearer token; 401/423 时弹登录框 */
+let authToken = localStorage.getItem('auth_token') || '';
+
+async function apiFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers);
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+  const r = await fetch(url, opts);
+  if (r.status === 401 || r.status === 423) {
+    let locked = 0;
+    try { locked = (await r.clone().json()).locked || 0; } catch (e) { /* 忽略 */ }
+    if (locked > 0) {
+      toast(`尝试次数过多, 请${locked}秒后重试`);
+    } else {
+      showLogin(true);
+    }
+    throw new Error('unauthorized');
+  }
+  return r;
+}
+
+function showLogin(force) {
+  const box = document.getElementById('loginBox');
+  if (!box || (!force && box.style.display === 'flex')) return;
+  box.style.display = 'flex';
+  const input = document.getElementById('loginInput');
+  input.value = authToken;
+  input.focus();
+  document.getElementById('loginErr').textContent = '';
+}
+
+async function submitLogin() {
+  const input = document.getElementById('loginInput');
+  const token = input.value.trim();
+  const err = document.getElementById('loginErr');
+  if (!token) { err.textContent = '请输入访问令牌'; return; }
+  try {
+    const r = await apiFetch('/api/auth/status', {
+      headers: {'Authorization': 'Bearer ' + token}
+    });
+    const st = await r.json();
+    if (!st.ok) { err.textContent = '令牌无效'; return; }
+    authToken = token;
+    localStorage.setItem('auth_token', token);
+    document.getElementById('loginBox').style.display = 'none';
+    // 重新拉取所有数据
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); refreshQuotes();
+  } catch (e) {
+    err.textContent = '网络错误, 请重试';
+  }
+}
+
 function toast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
@@ -56,7 +108,7 @@ let idxData = [];
 
 async function loadIdxList() {
   try {
-    const r = await fetch('/api/index/list');
+    const r = await apiFetch('/api/index/list');
     idxData = await r.json();
     renderIdxList();
   } catch (e) { /* 下轮重试 */ }
@@ -105,7 +157,7 @@ let curEtf = null;
 
 async function loadEtfList() {
   try {
-    const r = await fetch('/api/etf/list');
+    const r = await apiFetch('/api/etf/list');
     etfData = await r.json();
     document.getElementById('etfUpd').textContent =
       new Date().toTimeString().slice(0, 5) + ' 更新';
@@ -167,21 +219,25 @@ function switchTf(tf) {
 const KChart = {
   data: [],          // [[date, open, close, high, low, volume], ...]
   ma: {},            // {5: [...], 10: [...], 20: [...], 60: [...]}
+  macd: null,        // {dif: [...], dea: [...], hist: [...]}(与data等长, 前部为null)
   win: null,         // {start, end} 索引窗口
   hover: null,       // {x, y} 鼠标位置
   code: '', tf: 'day',
   MA_COLORS: {5: '#f5a623', 10: '#4a90e2', 20: '#b37feb', 60: '#26a69a'},
-  PAD_R: 56, PAD_B: 20, VOL_H: 0.22,
+  DIF_COLOR: '#e6c217', DEA_COLOR: '#e0559c',
+  PAD_R: 56, PAD_B: 20,
+  MACD_H: 0.18, VOL_H: 0.15,   // MACD副图/成交量占图高比例
 
   async load(code, tf) {
     this.code = code; this.tf = tf;
     this.data = []; this.win = null; this.draw();
     try {
-      const r = await fetch(`/api/kline?code=${code}&tf=${tf}&n=800`);
+      const r = await apiFetch(`/api/kline?code=${code}&tf=${tf}&n=800`);
       this.data = await r.json();
     } catch (e) { /* 保持空 */ }
     if (this.code !== code || this.tf !== tf) return;  // 已切换
     this.calcMa();
+    this.calcMacd();
     // 默认显示最近 120 根
     const n = this.data.length;
     this.win = {start: Math.max(0, n - 120), end: n - 1};
@@ -202,6 +258,36 @@ const KChart = {
       }
       this.ma[p] = arr;
     });
+  },
+
+  /* 标准 MACD(12,26,9): DIF=EMA12-EMA26, DEA=EMA9(DIF), HIST=2*(DIF-DEA) */
+  calcMacd() {
+    const closes = this.data.map(r => r[2]);
+    const n = closes.length;
+    const dif = new Array(n).fill(null);
+    const dea = new Array(n).fill(null);
+    const hist = new Array(n).fill(null);
+    if (n < 26) { this.macd = {dif, dea, hist}; return; }
+    const ema = (p) => {
+      const out = new Array(n).fill(null);
+      const k = 2 / (p + 1);
+      let prev = null;
+      for (let i = 0; i < n; i++) {
+        prev = prev == null ? closes[i] : closes[i] * k + prev * (1 - k);
+        out[i] = prev;
+      }
+      return out;
+    };
+    const ema12 = ema(12), ema26 = ema(26);
+    const k9 = 2 / (9 + 1);
+    let deaPrev = null;
+    for (let i = 0; i < n; i++) {
+      dif[i] = ema12[i] - ema26[i];
+      deaPrev = deaPrev == null ? dif[i] : dif[i] * k9 + deaPrev * (1 - k9);
+      dea[i] = deaPrev;
+      hist[i] = 2 * (dif[i] - dea[i]);
+    }
+    this.macd = {dif, dea, hist};
   },
 
   /* ---------- 双端滑条 ---------- */
@@ -283,12 +369,18 @@ const KChart = {
     const rows = this.data.slice(this.win.start, this.win.end + 1);
     const off = this.win.start;
     const plotW = W - this.PAD_R;
-    const volTop = H - this.PAD_B - (H - this.PAD_B) * this.VOL_H;
-    const kH = volTop - 8 - 6;      // 主图高度(留顶部信息区)
+    // 三段布局: 主图(K线) / MACD副图 / 成交量, 底部留PAD_B
+    const plotH = H - this.PAD_B - 8 - 6;           // 总绘图高度(顶部信息区6px)
+    const volH = plotH * this.VOL_H;
+    const macdH = plotH * this.MACD_H;
+    const kH = plotH - volH - macdH - 2 * 8;        // 两处8px分隔带
     const kTop = 6;
+    const macdTop = kTop + kH + 8;
+    const volTop = macdTop + macdH + 8;
 
     // ---- 价格范围 ----
     let pMin = Infinity, pMax = -Infinity, vMax = 0;
+    let mAbsMax = 0;
     rows.forEach(r => {
       pMin = Math.min(pMin, r[4]); pMax = Math.max(pMax, r[3]);
       vMax = Math.max(vMax, r[5]);
@@ -299,10 +391,15 @@ const KChart = {
         if (v != null) { pMin = Math.min(pMin, v); pMax = Math.max(pMax, v); }
       }
     });
+    for (let i = off; i <= this.win.end; i++) {
+      const h = this.macd.hist[i];
+      if (h != null) mAbsMax = Math.max(mAbsMax, Math.abs(h),
+                                        Math.abs(this.macd.dif[i]), Math.abs(this.macd.dea[i]));
+    }
     const pPad = (pMax - pMin) * 0.06 || pMax * 0.01;
     pMin -= pPad; pMax += pPad;
     const yP = v => kTop + (1 - (v - pMin) / (pMax - pMin)) * kH;
-    const yV = v => volTop + (H - this.PAD_B - 8 - volTop) * (1 - v / (vMax || 1)) + 8 - 8;
+    const yM = v => macdTop + (1 - (v + mAbsMax) / (2 * mAbsMax || 1)) * macdH;
     const cw = plotW / rows.length;
     const xC = i => i * cw + cw / 2;
 
@@ -327,6 +424,15 @@ const KChart = {
       ctx.fillStyle = C.axis;
       ctx.fillText(rows[i][0].slice(2).replace(/-/g, '/'), x, H - 6);
     }
+    // MACD副图分隔线 + 零轴
+    ctx.strokeStyle = C.grid;
+    ctx.beginPath(); ctx.moveTo(0, macdTop); ctx.lineTo(plotW, macdTop); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, macdTop + macdH); ctx.lineTo(plotW, macdTop + macdH); ctx.stroke();
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(0, yM(0)); ctx.lineTo(plotW, yM(0)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.axis; ctx.textAlign = 'left';
+    ctx.fillText((mAbsMax || 0).toFixed(2), plotW + 4, macdTop + 8);
     // 成交量分隔线
     ctx.strokeStyle = C.grid;
     ctx.beginPath(); ctx.moveTo(0, volTop); ctx.lineTo(plotW, volTop); ctx.stroke();
@@ -350,9 +456,9 @@ const KChart = {
       ctx.fillStyle = col;
       ctx.fillRect(x - bw / 2, top, bw, h);
       // 成交量柱
-      const vh = (H - this.PAD_B - 8 - volTop - 4) * (r[5] / (vMax || 1));
+      const vh = (H - this.PAD_B - volTop - 4) * (r[5] / (vMax || 1));
       ctx.globalAlpha = 0.55;
-      ctx.fillRect(x - bw / 2, H - this.PAD_B - 8 - vh + 8, bw, vh);
+      ctx.fillRect(x - bw / 2, H - this.PAD_B - vh, bw, vh);
       ctx.globalAlpha = 1;
     });
 
@@ -371,6 +477,36 @@ const KChart = {
       }
       ctx.stroke();
     });
+
+    // ---- MACD 副图: 柱状图 + DIF/DEA ----
+    if (this.macd) {
+      const zero = yM(0);
+      for (let i = off; i <= this.win.end; i++) {
+        const h = this.macd.hist[i];
+        if (h == null) continue;
+        const x = xC(i - off);
+        const y = yM(h);
+        ctx.fillStyle = h >= 0 ? C.up : C.down;
+        ctx.globalAlpha = 0.75;
+        ctx.fillRect(x - bw / 2, Math.min(y, zero), Math.max(bw, 1), Math.max(Math.abs(y - zero), 1));
+        ctx.globalAlpha = 1;
+      }
+      const drawLine = (arr, color) => {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        let started = false;
+        for (let i = off; i <= this.win.end; i++) {
+          const v = arr[i];
+          if (v == null) { started = false; continue; }
+          const x = xC(i - off), y = yM(v);
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      };
+      drawLine(this.macd.dif, this.DIF_COLOR);
+      drawLine(this.macd.dea, this.DEA_COLOR);
+    }
 
     // ---- 十字光标 ----
     if (this.hover) {
@@ -411,12 +547,20 @@ const KChart = {
       const col = this.MA_COLORS[p];
       return `<span style="color:${col}">MA${p}:${v == null ? '--' : v.toFixed(3)}</span>`;
     }).join('  ');
+    let macdTxt = '';
+    if (this.macd && this.macd.dif[i] != null) {
+      const d = this.macd.dif[i], a = this.macd.dea[i], h = this.macd.hist[i];
+      macdTxt = `<br>` +
+        `<span style="color:${this.DIF_COLOR}">DIF:${d.toFixed(3)}</span>  ` +
+        `<span style="color:${this.DEA_COLOR}">DEA:${a.toFixed(3)}</span>  ` +
+        `MACD:<b class="${h >= 0 ? 'up' : 'down'}">${h.toFixed(3)}</b>`;
+    }
     const cls = pctClass(chgPct);
     document.getElementById('chartTip').innerHTML =
       `<span style="color:var(--muted)">${r[0]}</span>  ` +
       `开<b>${r[1].toFixed(3)}</b> 高<b class="up">${r[3].toFixed(3)}</b> ` +
       `低<b class="down">${r[4].toFixed(3)}</b> 收<b class="${cls}">${r[2].toFixed(3)}</b> ` +
-      `<b class="${cls}">${fmtPct(chgPct)}</b> 量<b>${fmtVol(r[5])}</b><br>${maTxt}`;
+      `<b class="${cls}">${fmtPct(chgPct)}</b> 量<b>${fmtVol(r[5])}</b><br>${maTxt}${macdTxt}`;
   },
 
   init() {
@@ -465,7 +609,7 @@ const ShareChart = {
     this.code = code; this.tf = tf;
     this.data = []; this.hover = null; this.draw();
     try {
-      const r = await fetch(`/api/etf/share?code=${code}&tf=${tf}`);
+      const r = await apiFetch(`/api/etf/share?code=${code}&tf=${tf}`);
       this.data = await r.json();
     } catch (e) { /* 保持空 */ }
     if (this.code !== code || this.tf !== tf) return;  // 已切换
@@ -678,7 +822,7 @@ function selectWatch(code) {
 }
 
 async function loadWatch() {
-  const r = await fetch('/api/stocks');
+  const r = await apiFetch('/api/stocks');
   const stocks = await r.json();
   watchData = stocks;
   groups = [...new Set(stocks.map(s => s.group || '自选'))];
@@ -704,7 +848,7 @@ async function loadWatch() {
 
 async function refreshQuotes() {
   try {
-    const r = await fetch('/api/quotes');
+    const r = await apiFetch('/api/quotes');
     const data = await r.json();
     document.getElementById('upd').textContent =
       '更新 ' + new Date().toTimeString().slice(0, 5);
@@ -751,7 +895,7 @@ async function doSearch() {
   if (!q) return;
   const box = document.getElementById('results');
   box.innerHTML = '<div class="empty">搜索中…</div>';
-  const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+  const r = await apiFetch('/api/search?q=' + encodeURIComponent(q));
   const items = await r.json();
   if (!items.length) {
     box.innerHTML = '<div class="empty">未找到相关标的</div>';
@@ -786,7 +930,7 @@ async function addStock(code, name) {
   if (group === '新分组') {
     group = document.getElementById('newgrp-' + code).value.trim() || '自选';
   }
-  const r = await fetch('/api/stocks', {
+  const r = await apiFetch('/api/stocks', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({code, name, group})
@@ -797,7 +941,7 @@ async function addStock(code, name) {
 }
 
 async function delStock(code) {
-  const r = await fetch('/api/stocks?code=' + encodeURIComponent(code), {method: 'DELETE'});
+  const r = await apiFetch('/api/stocks?code=' + encodeURIComponent(code), {method: 'DELETE'});
   const res = await r.json();
   toast(res.ok ? '已删除 ' + code : res.msg || '删除失败');
   if (res.ok) { loadWatch(); loadDivs(); }
@@ -819,7 +963,7 @@ let divRetryTimer = null;
 
 async function loadDivs() {
   try {
-    const r = await fetch('/api/divergences');
+    const r = await apiFetch('/api/divergences');
     renderDivs(await r.json());
   } catch (e) { /* 下轮重试 */ }
 }
@@ -946,10 +1090,20 @@ KChart.init();
 ShareChart.init();
 window.__kchartReady = true;
 applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的绘制
-loadIdxList();
-loadEtfList();
-loadWatch();
-loadDivs();
+
+/* 启动认证探测: 已启用认证且当前token无效则弹登录框, 否则正常加载 */
+(async function probeAuth() {
+  try {
+    const r = await fetch('/api/auth/status', {
+      headers: authToken ? {'Authorization': 'Bearer ' + authToken} : {}
+    });
+    const st = await r.json();
+    if (st.enabled && !st.ok) showLogin(true);
+    else { loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); }
+  } catch (e) {
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs();
+  }
+})();
 setInterval(refreshQuotes, 5000);
 setInterval(loadIdxList, 60000);
 setInterval(loadEtfList, 60000);

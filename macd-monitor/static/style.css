@@ -224,6 +224,18 @@ body.dark .tag.zs { background: #3d331a; }
          background: #2c3e50; color: #fff; padding: 10px 22px; border-radius: 20px;
          font-size: 14px; opacity: 0; transition: opacity .3s; pointer-events: none; }
 .toast.show { opacity: .95; }
+.login-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 100;
+              display: flex; align-items: center; justify-content: center; }
+.login-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+              padding: 28px 32px; width: 300px; display: flex; flex-direction: column;
+              gap: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.25); }
+.login-title { font-size: 16px; font-weight: 700; text-align: center; }
+.login-card input { padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+                    font-size: 14px; background: transparent; color: inherit; }
+.login-card input:focus { outline: none; border-color: var(--accent); }
+.login-err { color: var(--down); font-size: 12px; min-height: 16px; text-align: center; }
+.login-card button { background: var(--accent); color: #fff; padding: 9px; border-radius: 8px;
+                     font-size: 14px; cursor: pointer; border: none; }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
