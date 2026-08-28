@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -293,11 +293,11 @@ def get_etf_share_history(code, tf="day"):
     return out
 
 
-# ---------------- 全市场底背离扫描(每日) ----------------
+# ---------------- 全市场底背离扫描(交易日收盘后16:00) ----------------
 
 DIV_LOCK = threading.Lock()
 DIV_SCAN = {"ts": 0, "rows": [], "scanning": False, "done": 0, "total": 0}
-DIV_SCAN_INTERVAL = 86400   # 每隔1天全量重扫一次
+DIV_SCAN_HOUR = 16          # 每个交易日收盘后16:00才开始全量扫描
 DIV_RECENT = 100            # 只保留最近100周期内成立的背离
 DIV_KLINE_N = 350           # 拉取K线根数: 100周期窗口 + 极值间隔 + MACD预热
 
@@ -418,9 +418,27 @@ def _flatten_div_hist(days):
     return rows
 
 
+def _is_trading_day(day_str):
+    """用上证指数日K判断 day_str 是否交易日: 最后K线日期==该日(收盘后调用)。
+    接口异常时按交易日处理, 由扫描自身的重试兜底"""
+    try:
+        k = fetch_kline("sh000001", "day", 2)
+        return (not k) or k[-1][0][:10] == day_str
+    except Exception:
+        return True
+
+
+def _next_scan_wait(now):
+    """距下一个16:00扫描时刻的秒数"""
+    target = now.replace(hour=DIV_SCAN_HOUR, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return max(60.0, (target - now).total_seconds())
+
+
 def _div_scanner():
-    """后台线程: 每隔1天对全部A股的日线/周线底背离全量重扫一次。
-    结果按扫描日持久化(div_hist.json)滚动保留30天; 当日已扫过(含重启)直接用缓存不重扫"""
+    """后台线程: 每个交易日收盘后(北京时间16:00)对全部A股的日线/周线底背离全量重扫。
+    非交易日(周末/节假日)不扫描, 也不计入30天滚动窗口; 当日已扫过(含重启)直接用缓存不重扫"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     while True:
         try:
@@ -428,18 +446,22 @@ def _div_scanner():
             with DIV_LOCK:
                 DIV_SCAN["rows"] = _flatten_div_hist(days)
                 DIV_SCAN["ts"] = load_json(DIV_HIST_PATH, {}).get("ts", 0)
-            today = time.strftime("%Y-%m-%d")
-            if today not in days:   # 今日未扫过才启动全量扫描
+            now = now_cst()
+            today = now.strftime("%Y-%m-%d")
+            # 触发条件: 工作日 + 收盘后(16点) + 交易日 + 今日未扫过
+            due = (now.weekday() < 5 and now.hour >= DIV_SCAN_HOUR
+                   and _is_trading_day(today) and today not in days)
+            ok = True
+            if due:
                 with DIV_LOCK:
                     DIV_SCAN.update(scanning=True, done=0, total=0)
                 try:
                     stocks = fetch_all_stocks()
-                    now = now_cst()
                     with DIV_LOCK:
                         DIV_SCAN["total"] = len(stocks) * 2
                     rows = []
                     with ThreadPoolExecutor(max_workers=4) as ex:
-                        futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
+                        futs = [ex.submit(_scan_one_divs, s, now_cst()) for s in stocks]
                         for fu in as_completed(futs):
                             try:
                                 rows.extend(fu.result())
@@ -451,17 +473,20 @@ def _div_scanner():
                     for k in sorted(days)[:max(0, len(days) - DIV_KEEP_DAYS)]:
                         days.pop(k, None)   # 淘汰第31天以前的数据
                     _save_div_hist(days)
+                    with DIV_LOCK:
+                        DIV_SCAN["rows"] = _flatten_div_hist(days)
+                        DIV_SCAN["ts"] = time.time()
                 except Exception:
-                    pass
+                    ok = False   # 扫描中断: 当日未标记, 稍后重试
                 finally:
                     with DIV_LOCK:
                         DIV_SCAN["scanning"] = False
-                with DIV_LOCK:
-                    DIV_SCAN["rows"] = _flatten_div_hist(days)
-                    DIV_SCAN["ts"] = time.time()
+            if due and not ok:
+                time.sleep(600)   # 扫描失败, 10分钟后重试当日
+            else:
+                time.sleep(_next_scan_wait(now_cst()))   # 休眠到下一个16:00
         except Exception:
-            pass
-        time.sleep(DIV_SCAN_INTERVAL)
+            time.sleep(300)
 
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -521,10 +546,13 @@ class Handler(BaseHTTPRequestHandler):
             tf = q.get("tf", ["day"])[0]
             self._json(get_etf_share_history(code, tf))
         elif u.path == "/api/divergences":
+            with CFG_LOCK:
+                watch_codes = {s.get("code") for s in load_cfg().get("stocks", [])}
             with DIV_LOCK:
+                rows = [{**r, "watch": r["code"] in watch_codes} for r in DIV_SCAN["rows"]]
                 payload = {"ts": DIV_SCAN["ts"], "scanning": DIV_SCAN["scanning"],
                            "done": DIV_SCAN["done"], "total": DIV_SCAN["total"],
-                           "rows": list(DIV_SCAN["rows"])}
+                           "rows": rows}
             self._json(payload)
         elif u.path == "/api/kline":
             q = parse_qs(u.query)

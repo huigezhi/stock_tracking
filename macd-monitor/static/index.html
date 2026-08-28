@@ -71,7 +71,7 @@
     </div>
     <div class="div-panel">
       <div class="div-head">
-        <h3>日线 / 周线底背离标的 <small>全部A股扫描 · 每日更新 · 仅最近100周期 · 点击行查看K线</small></h3>
+        <h3>日线 / 周线底背离标的 <small>全部A股扫描 · 交易日16:00更新 · 仅最近100周期 · 点击行查看K线</small></h3>
         <span class="upd" id="divUpd"></span>
       </div>
       <div class="div-filters">
@@ -80,6 +80,11 @@
           <option value="">日线 + 周线</option>
           <option value="day">日线底背离</option>
           <option value="week">周线底背离</option>
+        </select>
+        <select id="divWatch" onchange="applyDivFilters()" title="按是否自选股筛选">
+          <option value="">全部标的</option>
+          <option value="1">自选股</option>
+          <option value="0">非自选股</option>
         </select>
         <input id="divQ" placeholder="筛选名称 / 代码" oninput="applyDivFilters()">
         <span class="div-count" id="divCount"></span>

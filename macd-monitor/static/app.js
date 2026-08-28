@@ -701,14 +701,14 @@ async function addStock(code, name) {
   });
   const res = await r.json();
   toast(res.ok ? `已添加 ${name} → ${group}` : res.msg || '添加失败');
-  if (res.ok) { loadWatch(); doSearch(); }
+  if (res.ok) { loadWatch(); doSearch(); loadDivs(); }
 }
 
 async function delStock(code) {
   const r = await fetch('/api/stocks?code=' + encodeURIComponent(code), {method: 'DELETE'});
   const res = await r.json();
   toast(res.ok ? '已删除 ' + code : res.msg || '删除失败');
-  if (res.ok) loadWatch();
+  if (res.ok) { loadWatch(); loadDivs(); }
 }
 
 /* ================= 启动 ================= */
@@ -763,9 +763,11 @@ function applyDivFilters() {
   const q = document.getElementById('divQ').value.trim().toLowerCase();
   const tf = document.getElementById('divTf').value;
   const date = document.getElementById('divDate').value;
+  const watch = document.getElementById('divWatch').value;
   divFiltered = divAll.filter(r =>
       (!tf || r.tf === tf) &&
       (!date || r.scan === date) &&
+      (watch === '' || !!r.watch === (watch === '1')) &&
       (!q || r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q)));
   renderDivTable();
 }
