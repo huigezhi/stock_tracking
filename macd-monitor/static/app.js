@@ -735,24 +735,25 @@ function renderDivs(d) {
   const body = document.getElementById('divBody');
   divRows = d.rows || [];
   const upd = document.getElementById('divUpd');
-  upd.textContent = d.ts
-    ? new Date(d.ts * 1000).toLocaleString('zh-CN',
-        { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) + ' 扫描'
-    : '';
-  if (!divRows.length && d.scanning) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">正在扫描监控列表日线 / 周线…</td></tr>';
+  let txt = '';
+  if (d.scanning) {
+    const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+    txt = `扫描中 ${d.done}/${d.total} (${pct}%)`;
     clearTimeout(divRetryTimer);
-    divRetryTimer = setTimeout(loadDivs, 20000);
-    return;
+    divRetryTimer = setTimeout(loadDivs, 10000);   // 扫描期间高频轮询进度
+  } else if (d.ts) {
+    txt = new Date(d.ts * 1000).toLocaleString('zh-CN',
+        { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) + ' 扫描';
   }
+  upd.textContent = txt;
   if (!divRows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = `<tr><td colspan="7" class="empty">${d.scanning ? '正在全市场扫描日线 / 周线底背离，约需15~30分钟…' : '暂无底背离标的'}</td></tr>`;
     return;
   }
   body.innerHTML = divRows.map((r, i) => `
     <tr class="div-row" onclick="viewDivIdx(${i})">
       <td class="di">${i + 1}</td>
-      <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}${r.group ? ' · ' + esc(r.group) : ''}</span></td>
+      <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}</span></td>
       <td class="dtf">${r.tf_name}</td>
       <td class="dd">${r.date1} → ${r.date2}</td>
       <td class="dv">${r.price1.toFixed(2)} → ${r.price2.toFixed(2)}</td>
@@ -767,7 +768,7 @@ function viewDivIdx(i) {
   curEtf = r.code;   // 让日K/周K切换按钮作用于该标的
   document.getElementById('chName').textContent = r.name;
   document.getElementById('chCode').textContent = r.code;
-  document.getElementById('chIndex').textContent = r.group || '';
+  document.getElementById('chIndex').textContent = r.tf_name + '底背离';
   ['chPrice', 'chChg'].forEach(id => {
     const el = document.getElementById(id);
     el.textContent = '--';

@@ -293,61 +293,122 @@ def get_etf_share_history(code, tf="day"):
     return out
 
 
-# ---------------- 全量底背离扫描(每日) ----------------
+# ---------------- 全市场底背离扫描(每日) ----------------
 
 DIV_LOCK = threading.Lock()
-DIV_SCAN = {"ts": 0, "rows": [], "scanning": False}
-DIV_WAKE = threading.Event()
+DIV_SCAN = {"ts": 0, "rows": [], "scanning": False, "done": 0, "total": 0}
 DIV_SCAN_INTERVAL = 86400   # 每隔1天全量重扫一次
+DIV_RECENT = 100            # 只保留最近100周期内成立的背离
+DIV_KLINE_N = 350           # 拉取K线根数: 100周期窗口 + 极值间隔 + MACD预热
+
+ALL_STOCKS_PATH = os.path.join(BASE, "all_stocks.json")
+ALL_LOCK = threading.Lock()
+ALL_CACHE = {"ts": 0, "data": []}
+SINA_LIST = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/"
+             "json_v2.php/Market_Center.getHQNodeData?page={}&num=100"
+             "&sort=symbol&asc=1&node=hs_a")
 
 
-def scan_bottom_divergences():
-    """扫描监控列表全部股票的日线/周线底背离(每个 周期 取最新一条),
-    返回按确认日期倒序的标的清单, 供中栏下方面板展示"""
-    now = now_cst()
-    with CFG_LOCK:
-        stocks = load_cfg().get("stocks", [])
+def fetch_all_stocks():
+    """新浪接口分页拉取全部沪深A股(剔除北交所, 约5300只), 内存+落盘缓存1天"""
+    now = time.time()
+    with ALL_LOCK:
+        if ALL_CACHE["data"] and now - ALL_CACHE["ts"] < 86400:
+            return ALL_CACHE["data"]
+    cached = load_json(ALL_STOCKS_PATH, {})
+    if cached.get("stocks") and now - cached.get("ts", 0) < 86400:
+        with ALL_LOCK:
+            ALL_CACHE.update(ts=cached["ts"], data=cached["stocks"])
+        return cached["stocks"]
+    out, page = [], 1
+    while True:
+        try:
+            r = S.get(SINA_LIST.format(page), timeout=10).json()
+        except Exception:
+            break
+        if not r:
+            break
+        for x in r:
+            sym = x.get("symbol", "")
+            if sym[:2] not in ("sh", "sz"):   # 剔除北交所
+                continue
+            try:
+                price = float(x.get("trade") or 0) or None
+            except (TypeError, ValueError):
+                price = None
+            out.append({"code": sym, "name": x.get("name", ""), "price": price})
+        if len(r) < 100:
+            break
+        page += 1
+    if len(out) < 100:   # 拉取异常, 回退旧缓存(哪怕已过期)
+        with ALL_LOCK:
+            if ALL_CACHE["data"]:
+                return ALL_CACHE["data"]
+        return cached.get("stocks", [])
+    with ALL_LOCK:
+        ALL_CACHE.update(ts=time.time(), data=out)
+    tmp = ALL_STOCKS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": ALL_CACHE["ts"], "stocks": out}, f, ensure_ascii=False)
+    os.replace(tmp, ALL_STOCKS_PATH)
+    return out
+
+
+def _scan_one_divs(stock, now):
+    """扫描单只股票的日线/周线底背离, 只保留最近 DIV_RECENT 周期内成立的信号"""
+    code = stock["code"]
     rows = []
-    for s in stocks:
-        code, name = s.get("code", ""), s.get("name", "")
-        if not code:
+    for tf, tf_name in (("day", "日线"), ("week", "周线")):
+        try:
+            klines = fetch_kline(code, tf, DIV_KLINE_N)
+        except Exception:
             continue
-        for tf, tf_name in (("day", "日线"), ("week", "周线")):
-            time.sleep(0.3)   # 轻微限速, 避免触发行情接口WAF
-            klines = fetch_kline(code, tf, 500)
-            if len(klines) < 60:
+        if len(klines) < 160:   # 100周期窗口 + EMA预热下限
+            continue
+        last = len(klines) - 1
+        if not bar_complete(tf, klines[last][0], now):   # 剔除未收盘K线
+            last -= 1
+            if last < 160:
                 continue
-            last = len(klines) - 1
-            if not bar_complete(tf, klines[last][0], now):   # 剔除未收盘K线
-                last -= 1
-                if last < 60:
-                    continue
-            bars = [(k[0], k[2]) for k in klines[:last + 1]]  # (日期, 收盘价)
-            dif, _, _ = calc_macd([c for _, c in bars])
-            found = [d for d in detect_divergences(bars, dif, last, pairs=999)
-                     if d["div"] == "bull"]
-            if not found:
-                continue
-            d = found[-1]  # 最新一条底背离
+        bars = [(k[0], k[2]) for k in klines[:last + 1]]  # (日期, 收盘价)
+        dif, _, _ = calc_macd([c for _, c in bars])
+        for d in detect_divergences(bars, dif, last, pairs=999):
+            if d["div"] != "bull" or d["p2"] < last - DIV_RECENT + 1:
+                continue   # 只要最近100周期内成立的底背离
             rows.append({
-                "code": code, "name": name, "group": s.get("group", ""),
+                "code": code, "name": stock["name"], "price": stock["price"],
                 "tf": tf, "tf_name": tf_name,
                 "date1": bars[d["p1"]][0], "date2": bars[d["p2"]][0],
                 "price1": d["c1"], "price2": d["c2"],
                 "dif1": round(d["d1"], 3), "dif2": round(d["d2"], 3),
                 "confirm": bars[min(d["confirm"], last)][0],
             })
-    rows.sort(key=lambda r: (r["confirm"], r["code"]), reverse=True)
+        time.sleep(0.05)   # 轻微限速, 避免触发行情接口WAF
     return rows
 
 
 def _div_scanner():
-    """后台线程: 每日全量扫描一次; 监控列表增删时被唤醒立即重扫"""
+    """后台线程: 每隔1天对全部A股的日线/周线底背离全量重扫一次"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     while True:
         with DIV_LOCK:
-            DIV_SCAN["scanning"] = True
+            DIV_SCAN.update(scanning=True, done=0, total=0)
+        rows = []
         try:
-            rows = scan_bottom_divergences()
+            stocks = fetch_all_stocks()
+            now = now_cst()
+            with DIV_LOCK:
+                DIV_SCAN["total"] = len(stocks) * 2
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
+                for fu in as_completed(futs):
+                    try:
+                        rows.extend(fu.result())
+                    except Exception:
+                        pass
+                    with DIV_LOCK:
+                        DIV_SCAN["done"] += 2
+            rows.sort(key=lambda r: (r["confirm"], r["code"]), reverse=True)
             with DIV_LOCK:
                 DIV_SCAN["ts"] = time.time()
                 DIV_SCAN["rows"] = rows
@@ -356,8 +417,7 @@ def _div_scanner():
         finally:
             with DIV_LOCK:
                 DIV_SCAN["scanning"] = False
-        DIV_WAKE.wait(DIV_SCAN_INTERVAL)
-        DIV_WAKE.clear()
+        time.sleep(DIV_SCAN_INTERVAL)
 
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -419,6 +479,7 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/divergences":
             with DIV_LOCK:
                 payload = {"ts": DIV_SCAN["ts"], "scanning": DIV_SCAN["scanning"],
+                           "done": DIV_SCAN["done"], "total": DIV_SCAN["total"],
                            "rows": list(DIV_SCAN["rows"])}
             self._json(payload)
         elif u.path == "/api/kline":
@@ -453,7 +514,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             stocks.append({"code": code, "name": name, "group": group})
             save_cfg(cfg)
-        DIV_WAKE.set()   # 监控列表变动, 唤醒底背离扫描线程立即重扫
         self._json({"ok": True})
 
     def do_DELETE(self):
@@ -467,7 +527,6 @@ class Handler(BaseHTTPRequestHandler):
             stocks = cfg.get("stocks", [])
             cfg["stocks"] = [s for s in stocks if s.get("code") != code]
             save_cfg(cfg)
-        DIV_WAKE.set()   # 监控列表变动, 唤醒底背离扫描线程立即重扫
         self._json({"ok": True})
 
 
