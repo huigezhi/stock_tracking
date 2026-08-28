@@ -27,17 +27,21 @@ MACD 金叉/死叉 + 底背离/顶背离监控 + 飞书机器人提醒 + 自选�
 
 ## 一键安装
 
-### Windows
+复制对应系统的一行命令到终端运行，从克隆代码到验证完成全自动，无需手动 clone：
 
-前置要求：[git](https://git-scm.com/download/win) 和 [Python 3](https://www.python.org/downloads/)（安装时勾选 *Add python.exe to PATH*）。
+### Windows（PowerShell，推荐）
 
-下载 [install.bat](install.bat) 后双击运行，或在 cmd 中执行：
-
-```bat
-curl -fsSL -o install.bat https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.bat && install.bat
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.ps1 | iex"
 ```
 
-脚本会自动：安装 requests 依赖 → 克隆代码到 `%USERPROFILE%\macd-monitor` → 生成 config.json → 运行 `--report` 验证。
+命令直接从网络执行，不在本地留下安装脚本。也可以 [下载 install.ps1](install.ps1) 后执行，或使用 [install.bat](install.bat)（双击运行）。
+
+### Windows（cmd）
+
+```bat
+curl -fsSL -o %TEMP%\install.bat https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.bat && %TEMP%\install.bat
+```
 
 ### Ubuntu / Debian
 
@@ -45,19 +49,22 @@ curl -fsSL -o install.bat https://raw.githubusercontent.com/huigezhi/stock_track
 bash <(curl -fsSL https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.sh)
 ```
 
-或克隆仓库后执行：
+### 前置要求
 
-```bash
-git clone https://github.com/huigezhi/stock_tracking.git
-bash stock_tracking/install.sh
-```
+- Windows：[git](https://git-scm.com/download/win) + [Python 3](https://www.python.org/downloads/)（安装时勾选 *Add python.exe to PATH*）
+- Ubuntu：无（脚本会用 apt 自动安装缺失的 git / python3 / requests）
 
-脚本会自动：安装 git / python3 / requests → 克隆代码到 `~/macd-monitor` → 生成 config.json → 运行 `--report` 验证。
+### 脚本自动完成的步骤
+
+1. 克隆代码（Windows 到 `%USERPROFILE%\macd-monitor`，Linux 到 `~/macd-monitor`；已存在则 `git pull` 更新，config.json 保留不覆盖）
+2. 安装 python 依赖 requests
+3. 生成 config.json
+4. 运行 `--report` 验证安装
 
 安装完成后：
 
 ```bash
-python3 monitor.py     # 启动监控 (~/macd-monitor/macd-monitor 目录下)
+python3 monitor.py     # 启动监控 (代码目录下)
 python3 webui.py       # 启动 Web UI, 浏览器打开 http://localhost:8688
 ```
 
@@ -126,7 +133,8 @@ systemctl restart macd-monitor              # 重启监控
 
 ```
 ├── install.sh            # Ubuntu/Debian 一键安装（本地运行）
-├── install.bat           # Windows 一键安装
+├── install.ps1           # Windows 一键安装（PowerShell，支持一行命令）
+├── install.bat           # Windows 一键安装（cmd / 双击运行）
 ├── deploy.sh             # VPS 服务器部署（systemd 开机自启）
 └── macd-monitor/
     ├── monitor.py            # MACD 监控 + 飞书推送
