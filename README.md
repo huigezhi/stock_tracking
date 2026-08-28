@@ -78,6 +78,30 @@ python3 monitor.py     # 启动监控 (代码目录下)
 python3 webui.py       # 启动 Web UI, 浏览器打开 http://localhost:8688
 ```
 
+## 一键卸载
+
+删除安装（自动终止运行中的监控进程、移除 systemd 服务、删除安装目录及全部数据，系统依赖如 Python / git 保留）：
+
+### Windows（PowerShell）
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/huigezhi/stock_tracking/main/uninstall.ps1 | iex"
+```
+
+### Ubuntu / Debian（本地安装版）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/huigezhi/stock_tracking/main/uninstall.sh)
+```
+
+### VPS 服务器版（含 systemd 服务）
+
+```bash
+sudo bash uninstall.sh    # 自动探测 /opt/macd-monitor; 也可指定目录: sudo bash uninstall.sh /opt/macd-monitor
+```
+
+注意：卸载会删除 `config.json`（飞书 webhook 配置）、监控状态与底背离扫描缓存等全部数据，如需保留请先备份。
+
 ## 手动运行（快速开始）
 
 ```bash
@@ -148,6 +172,8 @@ systemctl restart macd-monitor              # 重启监控
 ├── install.sh            # Ubuntu/Debian 一键安装（本地运行）
 ├── install.ps1           # Windows 一键安装（PowerShell，支持一行命令）
 ├── install.bat           # Windows 一键安装（cmd / 双击运行）
+├── uninstall.sh          # Linux 一键卸载（终止进程/移除服务/删除目录）
+├── uninstall.ps1         # Windows 一键卸载（PowerShell）
 ├── deploy.sh             # VPS 服务器部署（systemd 开机自启）
 └── macd-monitor/
     ├── monitor.py            # MACD 监控 + 飞书推送
