@@ -756,7 +756,26 @@ function updateDivDateOptions() {
   const dates = [...new Set(divAll.map(r => r.scan))].sort().reverse();
   sel.innerHTML = '<option value="">全部日期</option>' +
       dates.map(dt => `<option value="${dt}">${dt}</option>`).join('');
-  if (dates.includes(cur)) sel.value = cur;   // 保持用户已选日期
+  // 默认选最新交易日; 用户已改选则保持
+  sel.value = dates.includes(cur) ? cur : (dates[0] || '');
+}
+
+/* 列排序: null=默认(确认日期倒序), 'asc'/'desc'=升降序; 空值排最后 */
+let divSort = {key: null, dir: 'desc'};
+const DIV_SORT_COLS = {dif_inc: 'sortDifInc', chg3: 'sortChg3', chg5: 'sortChg5'};
+
+function toggleDivSort(key) {
+  if (divSort.key === key) {
+    divSort.dir = divSort.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    divSort = {key, dir: 'desc'};
+  }
+  for (const [k, id] of Object.entries(DIV_SORT_COLS)) {
+    const el = document.getElementById(id);
+    el.querySelector('.si').textContent =
+        divSort.key === k ? (divSort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+  }
+  renderDivTable();
 }
 
 function applyDivFilters() {
@@ -777,21 +796,38 @@ function renderDivTable() {
   document.getElementById('divCount').textContent =
       divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
   if (!divAll.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty">暂无底背离标的</td></tr>';
     return;
   }
   if (!divFiltered.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">无符合条件的标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="empty">无符合条件的标的</td></tr>';
     return;
   }
-  body.innerHTML = divFiltered.map((r, i) => `
-    <tr class="div-row" onclick="viewDivIdx(${i})">
+  let rows = divFiltered;
+  if (divSort.key) {
+    const k = divSort.key, s = divSort.dir === 'desc' ? -1 : 1;
+    rows = [...divFiltered].sort((a, b) => {
+      const va = a[k], vb = b[k];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;    // 空值(K线不足/旧缓存)恒排最后
+      if (vb == null) return -1;
+      return va < vb ? -s : va > vb ? s : 0;
+    });
+  }
+  const fmtPct = v => v == null ? '--' :
+      `<span class="${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+  const idxOf = new Map(divFiltered.map((r, i) => [r, i]));   // 行对象→筛选结果下标
+  body.innerHTML = rows.map((r, i) => `
+    <tr class="div-row" onclick="viewDivIdx(${idxOf.get(r)})">
       <td class="di">${i + 1}</td>
       <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}</span></td>
       <td class="dtf">${r.tf_name}</td>
       <td class="dd">${r.date1} → ${r.date2}</td>
       <td class="dv">${r.price1.toFixed(2)} → ${r.price2.toFixed(2)}</td>
       <td class="dv">${r.dif1} → ${r.dif2}</td>
+      <td class="dv">${r.dif_inc != null ? r.dif_inc.toFixed(3) : '--'}</td>
+      <td class="dv">${fmtPct(r.chg3)}</td>
+      <td class="dv">${fmtPct(r.chg5)}</td>
       <td class="dd">${r.confirm}</td>
       <td class="dd">${r.scan}</td>
     </tr>`).join('');

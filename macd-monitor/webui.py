@@ -372,15 +372,25 @@ def _scan_one_divs(stock, now):
                 continue
         bars = [(k[0], k[2]) for k in klines[:last + 1]]  # (日期, 收盘价)
         dif, _, _ = calc_macd([c for _, c in bars])
+        closes = [c for _, c in bars]
         for d in detect_divergences(bars, dif, last, pairs=999):
             if d["div"] != "bull" or d["p2"] < last - DIV_RECENT + 1:
                 continue   # 只要最近100周期内成立的底背离
+            p2 = d["p2"]
+
+            def _chg(n):
+                """第二低点后n周期的涨幅%, K线不足返回None"""
+                j = p2 + n
+                return round((closes[j] / d["c2"] - 1) * 100, 2) if j <= last else None
+
             rows.append({
                 "code": code, "name": stock["name"], "price": stock["price"],
                 "tf": tf, "tf_name": tf_name,
                 "date1": bars[d["p1"]][0], "date2": bars[d["p2"]][0],
                 "price1": d["c1"], "price2": d["c2"],
                 "dif1": round(d["d1"], 3), "dif2": round(d["d2"], 3),
+                "dif_inc": round(d["d2"] - d["d1"], 3),   # DIF增加值
+                "chg3": _chg(3), "chg5": _chg(5),          # 后3/5周期涨幅%
                 "confirm": bars[min(d["confirm"], last)][0],
             })
         time.sleep(0.05)   # 轻微限速, 避免触发行情接口WAF

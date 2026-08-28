@@ -78,7 +78,7 @@
         <select id="divDate" onchange="applyDivFilters()" title="按扫描日期筛选"></select>
         <select id="divTf" onchange="applyDivFilters()">
           <option value="">日线 + 周线</option>
-          <option value="day">日线底背离</option>
+          <option value="day" selected>日线底背离</option>
           <option value="week">周线底背离</option>
         </select>
         <select id="divWatch" onchange="applyDivFilters()" title="按是否自选股筛选">
@@ -93,10 +93,14 @@
         <table class="div-table">
           <thead><tr>
             <th>序号</th><th>股票</th><th>周期</th><th>底背离日期</th>
-            <th>价格变化</th><th>DIF变化</th><th>确认日期</th><th>发现日期</th>
+            <th>价格变化</th><th>DIF变化</th>
+            <th class="sortable" id="sortDifInc" onclick="toggleDivSort('dif_inc')">DIF增加值<span class="si"></span></th>
+            <th class="sortable" id="sortChg3" onclick="toggleDivSort('chg3')">3周期涨幅<span class="si"></span></th>
+            <th class="sortable" id="sortChg5" onclick="toggleDivSort('chg5')">5周期涨幅<span class="si"></span></th>
+            <th>确认日期</th><th>发现日期</th>
           </tr></thead>
           <tbody id="divBody">
-            <tr><td colspan="8" class="empty">加载中…</td></tr>
+            <tr><td colspan="11" class="empty">加载中…</td></tr>
           </tbody>
         </table>
       </div>

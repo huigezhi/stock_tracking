@@ -152,6 +152,8 @@ body.dark .ch-tag { background: #1d2c4d; }
 .dtf { font-size: 11px; }
 .dd { color: var(--muted); }
 .dv { font-variant-numeric: tabular-nums; }
+.div-table th.sortable { cursor: pointer; user-select: none; }
+.div-table th.sortable:hover { color: var(--text); }
 
 /* ---------- 右栏: MACD 监控 ---------- */
 .monitor-panel { padding: 14px 16px; }
