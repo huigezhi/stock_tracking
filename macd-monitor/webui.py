@@ -8,6 +8,8 @@ MACD 监控自选管理 Web UI
 前端为 static/ 下的静态文件, 后端提供 JSON API
 用法: python3 webui.py  然后浏览器打开 http://localhost:8688
 """
+import collections
+import itertools
 import json
 import os
 import re
@@ -20,9 +22,12 @@ from urllib.parse import urlparse, parse_qs, quote
 import requests
 
 # 复用监控进程的 MACD/背离检测逻辑, 保证面板与推送口径一致
-from monitor import bar_complete, detect_divergences, now_cst
+from monitor import (bar_complete, detect_divergences, fetch_klines,
+                     is_trading_time, now_cst, send_feishu_text)
 from monitor import macd as calc_macd
 import db
+import net
+from net import robust_get, fetch_quotes_any
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -98,7 +103,7 @@ def search_suggest(q):
     if not q:
         return []
     try:
-        r = S.get(f"https://smartbox.gtimg.cn/s3/?q={quote(q)}&t=all", timeout=8)
+        r = robust_get(f"https://smartbox.gtimg.cn/s3/?q={quote(q)}&t=all", timeout=8)
         import codecs
         m = re.search(r'v_hint="([^"]*)"', r.text)
         if not m:
@@ -134,28 +139,8 @@ def is_index_code(code):
 
 
 def fetch_quotes(codes):
-    """腾讯批量实时行情, 返回 {code: {name, price, chg, chg_pct, volume, amount, mcap}}"""
-    out = {}
-    codes = [c for c in codes if c]
-    if not codes:
-        return out
-    try:
-        r = S.get("https://qt.gtimg.cn/q=" + ",".join(codes), timeout=8)
-        text = r.content.decode("gbk", errors="replace")
-        for m in re.finditer(r'v_(\w+)="([^"]*)"', text):
-            code, f = m.group(1), m.group(2).split("~")
-            if len(f) < 46 or not f[3]:
-                continue
-            out[code] = {
-                "name": f[1], "price": float(f[3]),
-                "chg": float(f[31] or 0), "chg_pct": float(f[32] or 0),
-                "volume": float(f[36] or 0),   # 手
-                "amount": float(f[37] or 0),   # 万元
-                "mcap": float(f[45] or 0),     # 总市值(亿)
-            }
-        return out
-    except Exception:
-        return out
+    """批量实时行情(腾讯主源 + 新浪备源容灾), 返回 {code: {name, price, chg, chg_pct, volume, amount, mcap}}"""
+    return fetch_quotes_any(codes)
 
 
 _FLOW_CACHE = {}  # code -> (timestamp, 主力净流入元|None)
@@ -171,7 +156,7 @@ def fetch_flow(code):
     try:
         url = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
                f"MoneyFlow.ssl_qsfx_lscjfb?page=1&num=1&sort=opendate&asc=0&daima={code}")
-        r = S.get(url, timeout=8, headers={"Referer": "https://finance.sina.com.cn"})
+        r = robust_get(url, timeout=8, headers={"Referer": "https://finance.sina.com.cn"})
         data = json.loads(r.text)
         if data:
             val = float(data[0].get("netamount") or 0)
@@ -199,6 +184,195 @@ def build_quotes(stocks):
             item["flow"] = None if item["is_index"] else fetch_flow(code)
         result.append(item)
     return result
+
+
+# ---------------- SSE 行情推送(QuoteHub) ----------------
+# 单线程每3秒拉一次订阅代码的行情(自选+左栏列表去重合并), diff后广播给所有SSE订阅者;
+# 扫描线程每完成5%推送进度事件。替代前端各自轮询: N个标签页只有1份出网请求
+
+HUB_QUOTE_SEC = 3        # 行情刷新间隔
+HUB_HEARTBEAT_SEC = 15    # SSE 心跳间隔(防代理断连)
+
+_hub_subs_lock = threading.Lock()
+_hub_subs = {}   # client_id -> {"queue": deque, "codes": set, "alive": bool}
+_hub_codes = set()   # 所有订阅者需要行情的代码并集
+_hub_next_id = itertools.count(1)
+_hub_last_quotes = {}   # code -> 上次广播的行情dict(做diff)
+
+
+def hub_register(codes):
+    """订阅: 返回 (client_id, queue); codes为该订阅者需要的行情代码集"""
+    q = collections.deque(maxlen=50)
+    cid = next(_hub_next_id)
+    with _hub_subs_lock:
+        _hub_subs[cid] = {"queue": q, "codes": set(codes), "alive": True}
+        _recalc_hub_codes()
+    return cid, q
+
+
+def hub_unregister(cid):
+    with _hub_subs_lock:
+        _hub_subs.pop(cid, None)
+        _recalc_hub_codes()
+
+
+def hub_update_codes(cid, codes):
+    """订阅者刷新其关注的代码集(如切换左栏列表/增删自选时)"""
+    with _hub_subs_lock:
+        sub = _hub_subs.get(cid)
+        if sub is not None:
+            sub["codes"] = set(codes)
+            _recalc_hub_codes()
+
+
+def _recalc_hub_codes():
+    """重算并集(须持锁调用); 有新增代码时清空diff基准, 下轮立即全量推这些代码"""
+    global _hub_codes
+    new = set()
+    for sub in _hub_subs.values():
+        new |= sub["codes"]
+    added = new - _hub_codes
+    _hub_codes = new
+    for code in added:
+        _hub_last_quotes.pop(code, None)   # 新代码无diff基准 → 全量推
+
+
+def _hub_push(event):
+    """向所有订阅者队列投递事件(dict); 单订阅者队列满则丢最旧"""
+    with _hub_subs_lock:
+        for sub in _hub_subs.values():
+            q = sub["queue"]
+            q.append(event)
+            while len(q) >= q.maxlen:
+                q.popleft()
+
+
+def _hub_quote_loop():
+    """行情线程: 每3秒拉一次订阅代码的行情并广播diff"""
+    while True:
+        try:
+            with _hub_subs_lock:
+                codes = list(_hub_codes)
+            if codes:
+                quotes = fetch_quotes(codes)
+                changed = {}
+                for code, q in quotes.items():
+                    if q != _hub_last_quotes.get(code):
+                        changed[code] = q
+                        _hub_last_quotes[code] = q
+                if changed:
+                    _hub_push({"type": "quotes", "data": changed})
+            time.sleep(HUB_QUOTE_SEC)
+        except Exception:
+            time.sleep(5)
+
+
+def hub_scan_progress():
+    """扫描线程调用: 每完成5%推送一次进度"""
+    with DIV_LOCK:
+        scanning, done, total = (DIV_SCAN["scanning"], DIV_SCAN["done"],
+                                 DIV_SCAN["total"])
+    if not scanning or not total:
+        return
+    pct = done * 100 // total
+    if pct >= (getattr(hub_scan_progress, "_last", -1) + 5):
+        hub_scan_progress._last = pct
+        _hub_push({"type": "scan_progress", "done": done, "total": total, "pct": pct})
+    if pct >= 100:
+        hub_scan_progress._last = -1
+        _hub_push({"type": "scan_done"})
+
+
+# ---------------- 盘中实时背离预览(自选股60分钟线) ----------------
+# 交易时段每5分钟对自选股的60分钟K线跑一轮底背离检测(基于已收盘60分钟线),
+# 结果经SSE推给前端展示"盘中预览"徽章, 并以低优先级文本推送飞书(每信号每日一次);
+# 非交易时段不扫描。预览信号带 provisional 标记, 收盘后由16:00全量扫描正式确认
+
+INTRADAY_SEC = 300        # 交易时段扫描间隔(秒)
+INTRADAY_RECENT = 60      # 只保留最近60根60分钟线内成立的预览信号
+INTRADAY_TF = "60m"
+
+INTRADAY_LOCK = threading.Lock()
+INTRADAY_ROWS = []        # 最近一轮扫描到的预览信号(前端初始加载用)
+INTRADAY_PUSHED = {}      # (code, date2) -> 上次推送日, 飞书去重
+
+
+def _intraday_scan_one(code, name, now):
+    """单只自选股的60分钟线底背离预览, 返回信号行列表"""
+    try:
+        rows = fetch_klines(code, INTRADAY_TF, 320)
+    except Exception:
+        return []
+    if len(rows) < 120:   # 60根窗口 + 极值确认窗口 + MACD预热下限
+        return []
+    last = len(rows) - 1
+    if not bar_complete(INTRADAY_TF, rows[last][0], now):   # 剔除未收盘K线
+        last -= 1
+    if last < 120:
+        return []
+    bars = rows[:last + 1]
+    closes = [c for _, c in bars]
+    dif, _, _ = calc_macd(closes)
+    out = []
+    for d in detect_divergences(bars, dif, last, pairs=3):
+        if d["div"] != "bull" or d["p2"] < last - INTRADAY_RECENT + 1:
+            continue
+        out.append({
+            "code": code, "name": name, "tf": INTRADAY_TF,
+            "date1": bars[d["p1"]][0], "date2": bars[d["p2"]][0],
+            "price1": d["c1"], "price2": d["c2"],
+            "dif1": round(d["d1"], 4), "dif2": round(d["d2"], 4),
+            "confirm": bars[d["confirm"]][0],
+            "provisional": True,
+        })
+    return out
+
+
+def _intraday_scanner():
+    """后台线程: 交易时段定期扫描自选股60分钟线底背离, SSE推送 + 飞书低优先级通知"""
+    while True:
+        try:
+            now = now_cst()
+            if is_trading_time(now):
+                today = now.strftime("%Y-%m-%d")
+                with CFG_LOCK:
+                    stocks = load_cfg().get("stocks", [])
+                fresh, alerts = [], []
+                for s in stocks:
+                    rows = _intraday_scan_one(s.get("code", ""),
+                                              s.get("name", ""), now)
+                    if not rows:
+                        continue
+                    fresh.extend(rows)
+                    for r in rows:
+                        key = (r["code"], r["date2"])
+                        if INTRADAY_PUSHED.get(key) != today:
+                            INTRADAY_PUSHED[key] = today
+                            alerts.append(r)
+                if len(INTRADAY_PUSHED) > 500:   # 防止长期运行无限膨胀
+                    for k in list(INTRADAY_PUSHED)[:250]:
+                        INTRADAY_PUSHED.pop(k, None)
+                if alerts:
+                    lines = [
+                        f'[盘中预览] {r["name"]}({r["code"]}) 60分钟底背离 '
+                        f'价格{r["price1"]:.2f}→{r["price2"]:.2f} '
+                        f'DIF{r["dif1"]:.3f}→{r["dif2"]:.3f}(未收盘确认)'
+                        for r in alerts]
+                    try:
+                        with CFG_LOCK:
+                            cfg = load_cfg()
+                        send_feishu_text(cfg, "[MACD盘中预览·低优先级]\n" + "\n".join(lines))
+                    except Exception:
+                        pass
+                with INTRADAY_LOCK:
+                    INTRADAY_ROWS[:] = fresh
+                if fresh:
+                    _hub_push({"type": "intraday", "data": fresh})
+                time.sleep(INTRADAY_SEC)
+            else:
+                time.sleep(60)   # 非交易时段低频待机
+        except Exception:
+            time.sleep(120)
 
 
 # ---------------- 宽基ETF列表 ----------------
@@ -281,7 +455,7 @@ def _sina_kline(code, tf, n):
     """新浪日K回退(腾讯对北证指数等仅返回当日1根时使用); tf=week时拉日线按ISO周聚合"""
     need = n * 5 if tf == "week" else n
     try:
-        r = S.get("https://money.finance.sina.com.cn/quotes_service/api/"
+        r = robust_get("https://money.finance.sina.com.cn/quotes_service/api/"
                   f"json_v2.php/CN_MarketData.getKLineData?symbol={code}"
                   f"&scale=240&ma=no&datalen={min(need, 1023)}",
                   timeout=10, headers={"Referer": "https://finance.sina.com.cn"})
@@ -318,7 +492,7 @@ def fetch_kline(code, tf="day", n=800):
     ]
     for url in urls:
         try:
-            r = S.get(url, timeout=10)
+            r = robust_get(url, timeout=10)
             data = r.json().get("data", {}).get(code, {})
             rows = data.get(f"qfq{tf}") or data.get(tf)
             if rows and len(rows) > 5:   # 数据量过少视为无效(如北证指数仅返回当日1根)
@@ -483,7 +657,7 @@ def fetch_all_stocks():
     out, page = [], 1
     while True:
         try:
-            r = S.get(SINA_LIST.format(page), timeout=10).json()
+            r = robust_get(SINA_LIST.format(page), timeout=10).json()
         except Exception:
             break
         if not r:
@@ -734,6 +908,7 @@ def _div_scanner():
                                 pass
                             with DIV_LOCK:
                                 DIV_SCAN["done"] += 2
+                            hub_scan_progress()   # 每完成5%推送SSE进度事件
                     db.upsert_signals(rows, today)
                     with DIV_LOCK:
                         DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
@@ -947,8 +1122,72 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/tags":
             # 共振标签定义(前端展示徽章用)
             self._json({"labels": TAG_LABELS, "weights": TAG_WEIGHTS})
+        elif u.path == "/api/intraday":
+            # 盘中60分钟底背离预览信号(自选股, 前端初始加载; 之后走SSE)
+            with INTRADAY_LOCK:
+                self._json({"rows": list(INTRADAY_ROWS)})
+        elif u.path == "/api/health":
+            # 健康检查: 数据源状态/扫描状态/订阅数
+            with DIV_LOCK:
+                scan = {k: DIV_SCAN[k] for k in ("scanning", "done", "total", "ts")}
+            with _hub_subs_lock:
+                nsubs = len(_hub_subs)
+            kc = 0
+            try:
+                with KLINE_LOCK:
+                    kc = sum(len(v.get("bars", [])) for v in _KC["data"].values())
+            except Exception:
+                pass
+            with INTRADAY_LOCK:
+                n_intraday = len(INTRADAY_ROWS)
+            self._json({"ok": True, "sources": net.health(), "scan": scan,
+                        "sse_subs": nsubs, "kline_bars": kc, "intraday": n_intraday,
+                        "db_signals": len(db.div_rows(3650))})
+        elif u.path == "/api/stream":
+            self._handle_stream(parse_qs(u.query).get("codes", [""])[0])
         else:
             self.send_error(404)
+
+    def _handle_stream(self, codes_arg):
+        """SSE: 行情diff + 扫描进度 + 盘中预览事件推送, 替代前端轮询"""
+        if not self._auth_guard():
+            return
+        codes = [c for c in codes_arg.split(",") if c][:60]
+        cid, q = hub_register(codes)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"retry: 5000\n\n")   # 断线5秒后重连
+            self.wfile.flush()
+            last_heartbeat = time.time()
+            while True:
+                try:
+                    sent = False
+                    while q:   # 排空队列
+                        ev = q.popleft()
+                        data = json.dumps(ev, ensure_ascii=False)
+                        self.wfile.write(f"data: {data}\n\n".encode())
+                        sent = True
+                    now_ts = time.time()
+                    if not sent and now_ts - last_heartbeat >= HUB_HEARTBEAT_SEC:
+                        self.wfile.write(b":ping\n\n")   # 心跳防代理断连
+                        sent = True
+                        last_heartbeat = now_ts
+                    if sent:
+                        self.wfile.flush()
+                    else:
+                        time.sleep(0.5)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                except Exception:
+                    break
+        except Exception:
+            pass   # 客户端断开
+        finally:
+            hub_unregister(cid)
 
     def do_POST(self):
         u = urlparse(self.path)
@@ -1020,8 +1259,10 @@ def main():
     host = os.environ.get("WEBUI_HOST", "0.0.0.0")
     port = int(os.environ.get("WEBUI_PORT", str(PORT)))
     srv = ThreadingHTTPServer((host, port), Handler)
+    threading.Thread(target=_hub_quote_loop, daemon=True).start()   # SSE行情聚合推送
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
     threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
+    threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览
     print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()
 

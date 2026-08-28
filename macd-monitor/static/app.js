@@ -50,8 +50,8 @@ async function submitLogin() {
     authToken = token;
     localStorage.setItem('auth_token', token);
     document.getElementById('loginBox').style.display = 'none';
-    // 重新拉取所有数据
-    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); refreshQuotes();
+    // 重新拉取所有数据(loadWatch内部会重建SSE连接)
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); refreshQuotes();
   } catch (e) {
     err.textContent = '网络错误, 请重试';
   }
@@ -111,6 +111,7 @@ async function loadIdxList() {
     const r = await apiFetch('/api/index/list');
     idxData = await r.json();
     renderIdxList();
+    ensureSSE();
   } catch (e) { /* 下轮重试 */ }
 }
 
@@ -163,6 +164,7 @@ async function loadEtfList() {
       new Date().toTimeString().slice(0, 5) + ' 更新';
     renderEtfList();
     if (!curEtf && etfData.length) selectEtf(etfData[0].code);
+    ensureSSE();
   } catch (e) { /* 下轮重试 */ }
 }
 
@@ -844,6 +846,8 @@ async function loadWatch() {
       <button class="del" onclick="event.stopPropagation();delStock('${esc(s.code)}')">删除</button>
     </div>`).join('');
   refreshQuotes();
+  updateIntradayBadges();
+  ensureSSE();   // 自选变化后重连SSE(订阅代码集已变)
 }
 
 async function refreshQuotes() {
@@ -854,39 +858,176 @@ async function refreshQuotes() {
       '更新 ' + new Date().toTimeString().slice(0, 5);
     for (const q of data) {
       quoteMap[q.code] = q;
-      const row = document.querySelector(`.watch-item[data-code="${CSS.escape(q.code)}"]`);
-      if (!row) continue;
-      const priceEl = row.querySelector('.qprice .p');
-      const unitEl = row.querySelector('.qprice .u');
-      const pctEl = row.querySelector('.qpct');
-      const flowEl = row.querySelector('.qflow .v');
-      const flowLbl = row.querySelector('.qflow .l');
-      if (!q.ok) {
-        priceEl.textContent = '--'; unitEl.textContent = '';
-        pctEl.textContent = '--'; pctEl.className = 'qcell qpct';
-        flowEl.textContent = '--'; flowLbl.textContent = '';
-        continue;
-      }
-      priceEl.textContent = q.price.toFixed(2);
-      priceEl.className = 'p ' + pctClass(q.chg_pct);
-      unitEl.textContent = (q.chg > 0 ? '+' : '') + q.chg.toFixed(2);
-      pctEl.textContent = fmtPct(q.chg_pct);
-      pctEl.className = 'qcell qpct ' + pctClass(q.chg_pct);
-      if (q.is_index) {
-        flowEl.textContent = fmtVol(q.volume);
-        flowEl.className = 'v';
-        flowLbl.textContent = '成交额 ' + (q.amount / 1e4).toFixed(1) + '亿';
-      } else if (q.flow !== null && q.flow !== undefined) {
-        flowEl.textContent = (q.flow > 0 ? '+' : '') + fmtYi(q.flow);
-        flowEl.className = 'v ' + pctClass(q.flow);
-        flowLbl.textContent = '主力净流入';
-      } else {
-        flowEl.textContent = (q.amount / 1e4).toFixed(1) + '亿';
-        flowEl.className = 'v';
-        flowLbl.textContent = '成交额';
-      }
+      updateWatchRow(q.code);
     }
   } catch (e) { /* 下轮重试 */ }
+}
+
+/* 更新单只自选行的行情DOM(轮询与SSE共用) */
+function updateWatchRow(code) {
+  const q = quoteMap[code];
+  const row = document.querySelector(`.watch-item[data-code="${CSS.escape(code)}"]`);
+  if (!q || !row) return;
+  const priceEl = row.querySelector('.qprice .p');
+  const unitEl = row.querySelector('.qprice .u');
+  const pctEl = row.querySelector('.qpct');
+  const flowEl = row.querySelector('.qflow .v');
+  const flowLbl = row.querySelector('.qflow .l');
+  if (!q.ok) {
+    priceEl.textContent = '--'; unitEl.textContent = '';
+    pctEl.textContent = '--'; pctEl.className = 'qcell qpct';
+    flowEl.textContent = '--'; flowLbl.textContent = '';
+    return;
+  }
+  priceEl.textContent = q.price.toFixed(2);
+  priceEl.className = 'p ' + pctClass(q.chg_pct);
+  unitEl.textContent = (q.chg > 0 ? '+' : '') + q.chg.toFixed(2);
+  pctEl.textContent = fmtPct(q.chg_pct);
+  pctEl.className = 'qcell qpct ' + pctClass(q.chg_pct);
+  if (q.is_index) {
+    flowEl.textContent = fmtVol(q.volume);
+    flowEl.className = 'v';
+    flowLbl.textContent = '成交额 ' + (q.amount / 1e4).toFixed(1) + '亿';
+  } else if (q.flow !== null && q.flow !== undefined) {
+    flowEl.textContent = (q.flow > 0 ? '+' : '') + fmtYi(q.flow);
+    flowEl.className = 'v ' + pctClass(q.flow);
+    flowLbl.textContent = '主力净流入';
+  } else {
+    flowEl.textContent = (q.amount / 1e4).toFixed(1) + '亿';
+    flowEl.className = 'v';
+    flowLbl.textContent = '成交额';
+  }
+}
+
+/* ================= SSE 实时推送 ================= */
+/* 后端 /api/stream: 行情diff(3s) + 扫描进度 + 盘中背离预览事件。
+   替代前端各自轮询: N个标签页只有1份出网请求; SSE断开时自动回退轮询 */
+let es = null;
+let sseOk = false;
+let sseLastCodes = '';
+let intradayMap = {};   // code -> 最近一轮盘中预览信号
+
+function sseCodes() {
+  const codes = [];
+  watchData.forEach(s => codes.push(s.code));
+  idxData.forEach(i => codes.push(i.code));
+  etfData.forEach(e => codes.push(e.code));
+  return [...new Set(codes)].slice(0, 60).join(',');
+}
+
+function setSseUI(ok) {
+  const dot = document.getElementById('sseDot');
+  if (!dot) return;
+  dot.className = 'sse-dot ' + (ok ? 'on' : 'off');
+  dot.title = ok ? 'SSE 实时推送已连接' : 'SSE 未连接，行情走轮询';
+}
+
+/* 关注代码集变化(增删自选/左栏刷新)时重连SSE */
+function ensureSSE() {
+  const c = sseCodes();
+  if (!c || !window.EventSource) return;
+  if (es && c === sseLastCodes) return;
+  sseLastCodes = c;
+  try { es && es.close(); } catch (e) { /* 忽略 */ }
+  let url = '/api/stream?codes=' + encodeURIComponent(c);
+  if (authToken) url += '&token=' + encodeURIComponent(authToken);
+  es = new EventSource(url);
+  es.onopen = () => { sseOk = true; setSseUI(true); };
+  es.onerror = () => { sseOk = false; setSseUI(false); };  // EventSource自动重连
+  es.onmessage = ev => {
+    try { handleSSE(JSON.parse(ev.data)); } catch (e) { /* 忽略坏帧 */ }
+  };
+}
+
+function handleSSE(ev) {
+  if (ev.type === 'quotes') {
+    applyQuoteDiff(ev.data || {});
+  } else if (ev.type === 'scan_progress') {
+    document.getElementById('divUpd').textContent =
+      `扫描中 ${ev.done}/${ev.total} (${ev.pct}%)`;
+  } else if (ev.type === 'scan_done') {
+    loadDivs();
+    toast('底背离全市场扫描完成');
+  } else if (ev.type === 'intraday') {
+    setIntraday(ev.data || []);
+  }
+}
+
+/* 行情diff: 更新自选行/左栏列表/中栏头部 */
+function applyQuoteDiff(diff) {
+  let listDirty = false;
+  for (const [code, q] of Object.entries(diff)) {
+    if (!q || !q.price) continue;
+    const i = idxData.find(x => x.code === code);
+    if (i) {
+      i.price = q.price; i.chg = q.chg; i.chg_pct = q.chg_pct; i.amount = q.amount;
+      listDirty = true;
+    }
+    const e = etfData.find(x => x.code === code);
+    if (e) {
+      e.price = q.price; e.chg = q.chg; e.chg_pct = q.chg_pct; e.amount = q.amount;
+      listDirty = true;
+    }
+    const prev = quoteMap[code];
+    quoteMap[code] = Object.assign({}, prev, q, {
+      ok: true,
+      is_index: (prev && prev.is_index) || code.startsWith('sh000') || code.startsWith('sz399'),
+    });
+    updateWatchRow(code);
+    if (code === curEtf) updateChartHeader(q);
+  }
+  if (listDirty) { renderIdxList(); renderEtfList(); }
+}
+
+function updateChartHeader(q) {
+  const p = document.getElementById('chPrice');
+  p.textContent = q.price.toFixed(2);
+  p.className = 'ch-price ' + pctClass(q.chg_pct);
+  const c = document.getElementById('chChg');
+  c.textContent = `${q.chg > 0 ? '+' : ''}${q.chg.toFixed(2)}  ${fmtPct(q.chg_pct)}`;
+  c.className = 'ch-chg ' + pctClass(q.chg_pct);
+  document.getElementById('chAmount').textContent = (q.amount / 1e4).toFixed(2) + '亿';
+}
+
+/* ================= 盘中背离预览徽章 ================= */
+function setIntraday(rows) {
+  const prevKeys = Object.keys(intradayMap);
+  intradayMap = {};
+  rows.forEach(r => { intradayMap[r.code] = r; });
+  updateIntradayBadges();
+  const fresh = Object.keys(intradayMap).filter(k => !prevKeys.includes(k));
+  if (fresh.length) {
+    const names = fresh.slice(0, 3).map(k => intradayMap[k].name).join('、');
+    toast(`盘中底背离: ${names}${fresh.length > 3 ? ' 等' : ''}(60分钟, 未收盘确认)`);
+  }
+}
+
+async function loadIntraday() {
+  try {
+    const r = await apiFetch('/api/intraday');
+    const d = await r.json();
+    (d.rows || []).forEach(x => { intradayMap[x.code] = x; });
+    updateIntradayBadges();
+  } catch (e) { /* 下轮重试 */ }
+}
+
+function updateIntradayBadges() {
+  document.querySelectorAll('.watch-item').forEach(el => {
+    const r = intradayMap[el.dataset.code];
+    let b = el.querySelector('.intraday-badge');
+    if (r) {
+      if (!b) {
+        b = document.createElement('span');
+        b.className = 'intraday-badge';
+        b.textContent = '60分背离';
+        el.querySelector('.wname').appendChild(b);
+      }
+      b.title = `60分钟底背离预览: 价格${r.price1.toFixed(2)}→${r.price2.toFixed(2)} ` +
+        `DIF ${r.dif1}→${r.dif2}(未收盘确认)`;
+    } else if (b) {
+      b.remove();
+    }
+  });
 }
 
 /* ================= 搜索 ================= */
@@ -1169,12 +1310,14 @@ applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的�
     });
     const st = await r.json();
     if (st.enabled && !st.ok) showLogin(true);
-    else { loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); }
+    else { loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); }
   } catch (e) {
-    loadIdxList(); loadEtfList(); loadWatch(); loadDivs();
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday();
   }
 })();
-setInterval(refreshQuotes, 5000);
+/* SSE连接时行情实时推送, 断开时回退5秒轮询; 低频轮询兜底主力资金流等SSE未覆盖字段 */
+setInterval(() => { if (!sseOk) refreshQuotes(); }, 5000);
+setInterval(refreshQuotes, 120000);
 setInterval(loadIdxList, 60000);
 setInterval(loadEtfList, 60000);
 setInterval(loadDivs, 3600000);   // 每小时拉一次, 后端每日全量重扫

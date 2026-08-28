@@ -278,3 +278,15 @@ body.dark .tag.zs { background: #3d331a; }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+/* SSE连接状态(顶栏圆点: 绿=实时推送, 红=已断开回退轮询) */
+.sse-dot { width: 8px; height: 8px; border-radius: 50%; flex: none;
+           background: var(--muted); opacity: .5; }
+.sse-dot.on { background: #26a69a; opacity: 1; box-shadow: 0 0 5px #26a69a; }
+.sse-dot.off { background: var(--down); opacity: .8; }
+/* 盘中60分钟底背离预览徽章(自选行, 未收盘确认) */
+.intraday-badge { display: inline-block; margin-left: 5px; padding: 0 5px;
+                  border-radius: 3px; font-size: 10px; line-height: 15px;
+                  color: #b8860b; background: rgba(230,194,23,.14);
+                  border: 1px solid rgba(230,194,23,.45); vertical-align: middle;
+                  cursor: help; white-space: nowrap; }
+.dark .intraday-badge { color: #e6c217; }

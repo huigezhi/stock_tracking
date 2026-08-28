@@ -10,3 +10,5 @@ macd-monitor/div_hist.json.bak
 macd-monitor/kline_cache.json
 macd-monitor/data.db*
 __pycache__/
+# TRAE 预览分享产物(IDE自动生成, 不入库)
+.trae-html-share-packages/
