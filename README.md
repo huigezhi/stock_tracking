@@ -2,6 +2,19 @@
 
 MACD 金叉/死叉 + 底背离/顶背离监控 + 飞书机器人提醒 + 自选管理 Web UI，数据源为腾讯行情接口，纯 Python 实现，适合部署在 VPS 上长期运行。
 
+## 目录
+
+- [功能](#功能)
+  - [MACD 监控（monitor.py）](#macd-监控monitorpy)
+  - [自选管理 Web UI（webui.py）](#自选管理-web-uiwebuipy)
+- [一键安装](#一键安装)
+- [一键卸载](#一键卸载)
+- [手动运行（快速开始）](#手动运行快速开始)
+- [VPS 服务器部署（systemd 开机自启）](#vps-服务器部署systemd-开机自启)
+- [配置说明（config.json）](#配置说明configjson)
+- [目录结构](#目录结构)
+- [说明](#说明)
+
 ## 功能
 
 ### MACD 监控（monitor.py）
