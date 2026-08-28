@@ -328,6 +328,88 @@ def fetch_kline(code, tf="day", n=800):
     return _sina_kline(code, tf, n)
 
 
+# ---------------- 左栏指数/宽基ETF K线本地缓存 ----------------
+# 历史K线持久化到 kline_cache.json(VPS本地), 增量只补最新交易日的数据, 加快加载;
+# 只更新到最新交易日收盘价, 周末等缓存已含最近交易日时不发起任何网络请求
+
+KLINE_CACHE_PATH = os.path.join(BASE, "kline_cache.json")
+KLINE_LOCK = threading.Lock()
+_KC = {"data": {}, "loaded": False}
+KLINE_KEEP = 800                 # 每标的每周期缓存的K线根数上限
+KLINE_FULL_SEC = 7 * 86400       # 每周顺带全量刷新一次, 修正前复权历史
+KLINE_RECHECK_SEC = 3600         # 增量取到新数据后, 再次校验的间隔
+KLINE_IDLE_RECHECK_SEC = 4 * 3600  # 校验后无新数据(节假日)的冷却时间
+CACHED_KLINE_CODES = set(INDEX_LIST) | set(BROAD_ETF_CANDIDATES)
+
+
+def _latest_expected_date(now):
+    """按当前北京时间推断缓存应有的最新交易日:
+    周末取最近周五; 交易日16点前取上一工作日(只更新到收盘价); 16点后取当日"""
+    d = now.date()
+    if d.weekday() >= 5:
+        d -= timedelta(days=d.weekday() - 4)
+    elif now.hour < 16:
+        d -= timedelta(days=1 if d.weekday() else 3)
+    return d.strftime("%Y-%m-%d")
+
+
+def _iso_week(date_str):
+    return datetime.strptime(date_str, "%Y-%m-%d").isocalendar()[:2]
+
+
+def _merge_klines(old, fresh, tf):
+    """按日期合并增量K线(同日期以新数据覆盖); 周线同一ISO周的旧K线被新K线替换"""
+    if not fresh:
+        return old
+    if tf == "week":
+        weeks = {_iso_week(b[0]) for b in fresh}
+        old = [b for b in old if _iso_week(b[0]) not in weeks]
+    bar_map = {b[0]: b for b in old}
+    for b in fresh:
+        bar_map[b[0]] = b
+    return sorted(bar_map.values(), key=lambda b: b[0])[-KLINE_KEEP:]
+
+
+def get_kline_cached(code, tf="day", n=800):
+    """左栏主要指数/宽基ETF的K线: 读本地缓存, 缓存落后于最新交易日时只增量拉取
+    最近数据合并; 非交易日(周末/缓存已含最近交易日)直接用缓存, 不刷新"""
+    n = max(60, min(int(n or 800), KLINE_KEEP))
+    tf = tf if tf in ("day", "week") else "day"
+    now_ts = time.time()
+    with KLINE_LOCK:
+        if not _KC["loaded"]:
+            _KC["data"] = load_json(KLINE_CACHE_PATH, {})
+            _KC["loaded"] = True
+        entry = _KC["data"].get(code, {}).get(tf) or {}
+        bars = list(entry.get("bars", []))
+        prev_last = bars[-1][0] if bars else None
+        # 缓存已是最新交易日, 或处于校验冷却期(节假日/刚查过) → 不请求网络
+        if bars and (bars[-1][0] >= _latest_expected_date(now_cst())
+                     or now_ts < entry.get("next_check", 0)):
+            return bars[-n:]
+        full_ts = entry.get("full_ts", 0)
+    # 无缓存→全量拉取; 距上次全量超过一周→顺带全量(修正前复权); 其余只拉最近60根增量
+    full = (not bars) or (now_ts - full_ts > KLINE_FULL_SEC)
+    fresh = fetch_kline(code, tf, KLINE_KEEP if full else 60)
+    with KLINE_LOCK:
+        entry = _KC["data"].setdefault(code, {}).setdefault(tf, {})
+        if fresh:
+            entry["bars"] = _merge_klines(entry.get("bars", []), fresh, tf)
+            if full:
+                entry["full_ts"] = now_ts
+            new_last = entry["bars"][-1][0] if entry["bars"] else None
+            # 取到新数据1小时后可再校验; 未取到(节假日)冷却4小时
+            entry["next_check"] = now_ts + (KLINE_IDLE_RECHECK_SEC if new_last == prev_last
+                                            else KLINE_RECHECK_SEC)
+        else:   # 拉取失败, 10分钟后重试
+            entry["next_check"] = now_ts + 600
+        tmp = KLINE_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_KC["data"], f, ensure_ascii=False)
+        os.replace(tmp, KLINE_CACHE_PATH)
+        return list(entry.get("bars", []))[-n:]
+
+
 def get_etf_share_history(code, tf="day"):
     """ETF份额历史(亿份): [[date, shares], ...]; tf=week 时按ISO周聚合, 取每周最后快照"""
     with SHARE_LOCK:
@@ -485,10 +567,10 @@ def _flatten_div_hist(days):
 
 
 def _is_trading_day(day_str):
-    """用上证指数日K判断 day_str 是否交易日: 最后K线日期==该日(收盘后调用)。
+    """用上证指数日K(本地缓存增量更新)判断 day_str 是否交易日: 最后K线日期==该日(收盘后调用)。
     接口异常时按交易日处理, 由扫描自身的重试兜底"""
     try:
-        k = fetch_kline("sh000001", "day", 2)
+        k = get_kline_cached("sh000001", "day", 2)
         return (not k) or k[-1][0][:10] == day_str
     except Exception:
         return True
@@ -627,7 +709,11 @@ class Handler(BaseHTTPRequestHandler):
             code = q.get("code", [""])[0]
             tf = q.get("tf", ["day"])[0]
             n = q.get("n", ["800"])[0]
-            self._json(fetch_kline(code, tf, n))
+            # 左栏指数/宽基ETF走本地缓存(增量更新), 其余标的直接实时拉取
+            if code in CACHED_KLINE_CODES:
+                self._json(get_kline_cached(code, tf, n))
+            else:
+                self._json(fetch_kline(code, tf, n))
         else:
             self.send_error(404)
 

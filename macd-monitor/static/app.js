@@ -808,9 +808,10 @@ function updateDivDateOptions() {
   sel.value = dates.includes(cur) ? cur : (dates[0] || '');
 }
 
-/* 列排序: null=默认(确认日期倒序), 'asc'/'desc'=升降序; 空值排最后 */
-let divSort = {key: null, dir: 'desc'};
-const DIV_SORT_COLS = {dif_inc: 'sortDifInc', chg3: 'sortChg3', chg5: 'sortChg5'};
+/* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
+let divSort = {key: 'confirm', dir: 'desc'};
+const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc',
+                       chg3: 'sortChg3', chg5: 'sortChg5'};
 
 function toggleDivSort(key) {
   if (divSort.key === key) {
@@ -844,11 +845,11 @@ function renderDivTable() {
   document.getElementById('divCount').textContent =
       divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
   if (!divAll.length) {
-    body.innerHTML = '<tr><td colspan="11" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty">暂无底背离标的</td></tr>';
     return;
   }
   if (!divFiltered.length) {
-    body.innerHTML = '<tr><td colspan="11" class="empty">无符合条件的标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="empty">无符合条件的标的</td></tr>';
     return;
   }
   let rows = divFiltered;
@@ -877,7 +878,6 @@ function renderDivTable() {
       <td class="dv">${fmtPct(r.chg3)}</td>
       <td class="dv">${fmtPct(r.chg5)}</td>
       <td class="dd">${r.confirm}</td>
-      <td class="dd">${r.scan}</td>
     </tr>`).join('');
 }
 
