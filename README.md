@@ -25,7 +25,43 @@ MACD 金叉/死叉 + 底背离/顶背离监控 + 飞书机器人提醒 + 自选�
 - **右栏 · 监控列表管理**：搜索添加 A股 / 指数 / ETF / LOF，分组管理，实时行情 + 主力净流入刷新
 - 明暗主题切换（跟随系统 / 白天 / 夜间），响应式布局
 
-## 快速开始
+## 一键安装
+
+### Windows
+
+前置要求：[git](https://git-scm.com/download/win) 和 [Python 3](https://www.python.org/downloads/)（安装时勾选 *Add python.exe to PATH*）。
+
+下载 [install.bat](install.bat) 后双击运行，或在 cmd 中执行：
+
+```bat
+curl -fsSL -o install.bat https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.bat && install.bat
+```
+
+脚本会自动：安装 requests 依赖 → 克隆代码到 `%USERPROFILE%\macd-monitor` → 生成 config.json → 运行 `--report` 验证。
+
+### Ubuntu / Debian
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/huigezhi/stock_tracking/main/install.sh)
+```
+
+或克隆仓库后执行：
+
+```bash
+git clone https://github.com/huigezhi/stock_tracking.git
+bash stock_tracking/install.sh
+```
+
+脚本会自动：安装 git / python3 / requests → 克隆代码到 `~/macd-monitor` → 生成 config.json → 运行 `--report` 验证。
+
+安装完成后：
+
+```bash
+python3 monitor.py     # 启动监控 (~/macd-monitor/macd-monitor 目录下)
+python3 webui.py       # 启动 Web UI, 浏览器打开 http://localhost:8688
+```
+
+## 手动运行（快速开始）
 
 ```bash
 # 依赖: python3 + requests
@@ -50,7 +86,7 @@ python3 webui.py
 # 浏览器打开 http://localhost:8688
 ```
 
-## VPS 一键部署
+## VPS 服务器部署（systemd 开机自启）
 
 ```bash
 sudo bash deploy.sh
@@ -89,18 +125,21 @@ systemctl restart macd-monitor              # 重启监控
 ## 目录结构
 
 ```
-macd-monitor/
-├── monitor.py            # MACD 监控 + 飞书推送
-├── webui.py              # 自选管理 Web UI 后端
-├── config.json           # 运行配置（自选股、webhook）
-├── config.example.json   # 配置示例
-├── state.json            # 信号去重状态
-├── etf_share_hist.json   # ETF 份额日度快照（自动积累）
-├── monitor.log           # 运行日志
-└── static/               # 前端静态文件
-    ├── index.html
-    ├── app.js
-    └── style.css
+├── install.sh            # Ubuntu/Debian 一键安装（本地运行）
+├── install.bat           # Windows 一键安装
+├── deploy.sh             # VPS 服务器部署（systemd 开机自启）
+└── macd-monitor/
+    ├── monitor.py            # MACD 监控 + 飞书推送
+    ├── webui.py              # 自选管理 Web UI 后端
+    ├── config.json           # 运行配置（自选股、webhook）
+    ├── config.example.json   # 配置示例
+    ├── state.json            # 信号去重状态
+    ├── etf_share_hist.json   # ETF 份额日度快照（自动积累）
+    ├── monitor.log           # 运行日志
+    └── static/               # 前端静态文件
+        ├── index.html
+        ├── app.js
+        └── style.css
 ```
 
 ## 说明
