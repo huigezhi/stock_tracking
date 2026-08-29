@@ -2,7 +2,54 @@
 
 MACD 金叉/死叉 + 底背离/顶背离监控 + 飞书机器人提醒 + 自选管理 Web UI，数据源为腾讯行情接口，纯 Python 实现，适合部署在 VPS 上长期运行。
 
+## 界面预览
+
+以下截图均为实际部署运行时抓取（行情数据实时拉取自腾讯接口）。
+
+### 主界面（浅色主题）
+
+三栏布局：左栏宽基ETF/指数列表，中栏K线图（MA均线 + MACD副图 + 成交量）+ 价格/份额变动面板 + 底背离标的面板，右栏自选监控列表。
+
+![主界面-浅色主题](docs/screenshots/overview-light.png)
+
+### K线图 + MACD 副图
+
+MA5/10/20/60 均线、MACD 副图（DIF/DEA/柱，与主图窗口联动缩放）、成交量副图；十字光标悬停显示当日价格与指标数值。
+
+![K线与MACD副图](docs/screenshots/chart-macd.png)
+
+### 底背离标的面板
+
+全市场（约5200只A股）日线/周线底背离扫描结果：共振评分徽章、DIF增加值、后3/5周期涨幅、确认日期等，五列表头可点击排序，点击行直接在K线图打开该标的。
+
+![底背离标的面板](docs/screenshots/divergence-panel.png)
+
+### 复盘统计弹窗
+
+每个信号确认后自动回填 3/5/10/20/60 个交易日收益，按周期、共振分层、确认月份分层展示胜率矩阵，用数据校准共振权重。
+
+![复盘统计](docs/screenshots/stats.png)
+
+### 系统状态面板
+
+顶栏"系统"按钮打开：运行时长、24h错误数、SSE订阅数、缓存规模、数据源域名熔断状态等健康卡片 + 实时事件日志。
+
+![系统状态面板](docs/screenshots/sys-panel.png)
+
+### 暗色主题与移动端
+
+明暗主题切换（跟随系统/白天/夜间）；移动端响应式布局，K线支持单指平移、双指缩放、长按弹出十字光标。
+
+<table>
+<tr>
+<td><img src="docs/screenshots/overview-dark.png" alt="暗色主题"/></td>
+<td><img src="docs/screenshots/mobile.png" width="200" alt="移动端"/></td>
+</tr>
+</table>
+
 ## 目录
+
+* [界面预览](#界面预览)
 
 * [功能](#功能)
 
@@ -246,6 +293,8 @@ systemctl restart macd-monitor              # 重启监控
 ├── uninstall.sh          # Linux 一键卸载（终止进程/移除服务/删除目录）
 ├── uninstall.ps1         # Windows 一键卸载（PowerShell）
 ├── deploy.sh             # VPS 服务器部署（systemd 开机自启）
+├── docs/
+│   └── screenshots/       # README 界面截图（实际部署抓取）
 └── macd-monitor/
     ├── monitor.py            # MACD 监控 + 飞书推送
     ├── webui.py              # 自选管理 Web UI 后端
