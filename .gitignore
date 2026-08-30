@@ -12,3 +12,5 @@ macd-monitor/data.db*
 __pycache__/
 # TRAE 预览分享产物(IDE自动生成, 不入库)
 .trae-html-share-packages/
+# 本机 SSH 隧道快捷方式(含服务器IP, 不入库)
+访问WebUI.bat
