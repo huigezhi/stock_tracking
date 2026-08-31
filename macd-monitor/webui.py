@@ -732,6 +732,7 @@ def get_etf_share_history(code, tf="day"):
 DIV_LOCK = threading.Lock()
 DIV_SCAN = {"ts": 0, "rows": [], "scanning": False, "done": 0, "total": 0}
 DIV_SCAN_HOUR = 16          # 每个交易日收盘后16:00才开始全量扫描
+_SCAN_NOW = threading.Event()   # 前端"立即更新"手动触发, 唤醒扫描线程
 DIV_RECENT = 100            # 只保留最近100周期内成立的背离
 DIV_KLINE_N = 350           # 拉取K线根数: 100周期窗口 + 极值间隔 + MACD预热
 
@@ -974,11 +975,45 @@ def _next_scan_wait(now):
     return max(60.0, (target - now).total_seconds())
 
 
+def _run_full_scan(scan_date):
+    """全市场底背离扫描主体(16:00定时与前端"立即更新"手动触发共用), 返回是否成功"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    now = now_cst()
+    with DIV_LOCK:
+        DIV_SCAN.update(scanning=True, done=0, total=0)
+    try:
+        stocks = fetch_all_stocks()
+        with DIV_LOCK:
+            DIV_SCAN["total"] = len(stocks) * 2
+        rows = []
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
+            for fu in as_completed(futs):
+                try:
+                    rows.extend(fu.result())
+                except Exception:
+                    pass
+                with DIV_LOCK:
+                    DIV_SCAN["done"] += 2
+                hub_scan_progress()   # 每完成5%推送SSE进度事件
+        db.upsert_signals(rows, scan_date)
+        with DIV_LOCK:
+            DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
+            DIV_SCAN["ts"] = time.time()
+        obs.record("INFO", "scan", f"全市场底背离扫描完成: {len(rows)}条信号入库")
+        return True
+    except Exception as e:
+        obs.record("ERROR", "scan", f"全市场扫描中断: {e!r}")
+        return False   # 扫描中断: 当日未标记, 稍后重试
+    finally:
+        with DIV_LOCK:
+            DIV_SCAN["scanning"] = False
+
+
 def _div_scanner():
     """后台线程: 每个交易日收盘后(北京时间16:00)对全部A股的日线/周线底背离全量重扫。
     结果UPSERT进SQLite(按code+tf+第二低点去重), 非交易日不扫描;
-    当日已扫过(含重启)直接用库内数据不重扫"""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    当日已扫过(含重启)直接用库内数据不重扫; 前端"立即更新"可随时手动触发"""
     while True:
         try:
             with DIV_LOCK:
@@ -987,44 +1022,26 @@ def _div_scanner():
                     db.last_scan_date() or "2000-01-01", "%Y-%m-%d"))
             now = now_cst()
             today = now.strftime("%Y-%m-%d")
-            # 触发条件: 工作日 + 收盘后(16点) + 交易日 + 今日未扫过
-            due = (now.weekday() < 5 and now.hour >= DIV_SCAN_HOUR
-                   and _is_trading_day(today) and db.last_scan_date() != today)
+            manual = _SCAN_NOW.is_set()
+            _SCAN_NOW.clear()
+            # 定时触发条件: 工作日 + 收盘后(16点) + 交易日 + 今日未扫过(手动触发不受限)
+            due = manual or (now.weekday() < 5 and now.hour >= DIV_SCAN_HOUR
+                             and _is_trading_day(today) and db.last_scan_date() != today)
             ok = True
             if due:
-                with DIV_LOCK:
-                    DIV_SCAN.update(scanning=True, done=0, total=0)
-                try:
-                    stocks = fetch_all_stocks()
-                    with DIV_LOCK:
-                        DIV_SCAN["total"] = len(stocks) * 2
-                    rows = []
-                    with ThreadPoolExecutor(max_workers=4) as ex:
-                        futs = [ex.submit(_scan_one_divs, s, now_cst()) for s in stocks]
-                        for fu in as_completed(futs):
-                            try:
-                                rows.extend(fu.result())
-                            except Exception:
-                                pass
-                            with DIV_LOCK:
-                                DIV_SCAN["done"] += 2
-                            hub_scan_progress()   # 每完成5%推送SSE进度事件
-                    db.upsert_signals(rows, today)
-                    with DIV_LOCK:
-                        DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
-                        DIV_SCAN["ts"] = time.time()
-                    obs.record("INFO", "scan",
-                               f"全市场底背离扫描完成: {len(rows)}条信号入库")
-                except Exception as e:
-                    ok = False   # 扫描中断: 当日未标记, 稍后重试
-                    obs.record("ERROR", "scan", f"全市场扫描中断: {e!r}")
-                finally:
-                    with DIV_LOCK:
-                        DIV_SCAN["scanning"] = False
-            if due and not ok:
-                time.sleep(600)   # 扫描失败, 10分钟后重试当日
-            else:
-                time.sleep(_next_scan_wait(now_cst()))   # 休眠到下一个16:00
+                last = db.last_scan_date()
+                if manual and last != today:
+                    # 手动刷新且今日定时扫描未完成: 结果记到最近一次扫描日,
+                    # 不把 last_scan_date 推进到今天, 16:00 定时扫描照常执行;
+                    # 盘中手动扫描只含已收盘K线, 与上次扫描数据口径一致
+                    scan_date = last or (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                else:
+                    scan_date = today   # 定时扫描 / 今日定时已完成后的手动刷新
+                ok = _run_full_scan(scan_date)
+            if due and not ok and not manual:
+                _SCAN_NOW.wait(600)   # 定时扫描失败, 10分钟后重试当日(可被手动触发唤醒)
+                continue
+            _SCAN_NOW.wait(_next_scan_wait(now_cst()))   # 休眠到下一个16:00(可被手动触发唤醒)
         except Exception as e:
             obs.record("ERROR", "scan", f"扫描线程异常: {e!r}")
             time.sleep(300)
@@ -1315,6 +1332,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/api/div/rescan":
+            # 前端"立即更新"按钮: 唤醒扫描线程手动全量重扫(不影响16:00定时扫描)
+            if not self._auth_guard():
+                return
+            with DIV_LOCK:
+                scanning = DIV_SCAN["scanning"]
+            if scanning:
+                self._json({"ok": False, "msg": "全市场扫描进行中, 请等待完成"})
+            else:
+                _SCAN_NOW.set()
+                self._json({"ok": True, "msg": "已触发全市场底背离扫描"})
+            return
         if u.path != "/api/stocks":
             self.send_error(404)
             return

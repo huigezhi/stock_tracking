@@ -725,6 +725,22 @@ async function loadDivs() {
   } catch (e) { /* 下轮重试 */ }
 }
 
+/* 手动触发全市场底背离重扫(不影响16:00定时扫描) */
+async function triggerDivRescan() {
+  const btn = document.getElementById('divRescanBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/div/rescan', {method: 'POST'});
+    const d = await r.json();
+    toast(d.ok ? '已触发全市场底背离扫描, 约6分钟' : (d.msg || '触发失败'));
+    if (d.ok) setTimeout(loadDivs, 1000);   // 立即进入扫描进度轮询
+  } catch (e) {
+    toast('触发失败, 请稍后重试');
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 5000);   // 防连点
+  }
+}
+
 function renderDivs(d) {
   divAll = d.rows || [];
   const upd = document.getElementById('divUpd');
