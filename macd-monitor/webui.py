@@ -168,6 +168,17 @@ def fetch_flow(code):
     return val
 
 
+def _quote_item(code, q):
+    """单条行情组装(build_quotes与/api/quotes?codes=共用)"""
+    item = {"code": code, "ok": bool(q)}
+    if q:
+        item.update({"name": q["name"], "price": q["price"],
+                     "chg": q["chg"], "chg_pct": q["chg_pct"],
+                     "volume": q["volume"], "amount": q["amount"],
+                     "is_index": is_index_code(code)})
+    return item
+
+
 def build_quotes(stocks):
     """组装监控列表的实时数据"""
     codes = [s.get("code", "") for s in stocks]
@@ -175,13 +186,8 @@ def build_quotes(stocks):
     result = []
     for s in stocks:
         code = s.get("code", "")
-        q = quotes.get(code)
-        item = {"code": code, "ok": bool(q)}
-        if q:
-            item.update({"name": q["name"], "price": q["price"],
-                         "chg": q["chg"], "chg_pct": q["chg_pct"],
-                         "volume": q["volume"], "amount": q["amount"],
-                         "is_index": is_index_code(code)})
+        item = _quote_item(code, quotes.get(code))
+        if item["ok"]:
             # 股票/ETF取主力净流入; 指数无资金流数据
             item["flow"] = None if item["is_index"] else fetch_flow(code)
         result.append(item)
@@ -579,6 +585,36 @@ def _sina_kline(code, tf, n):
         return bars
     except Exception:
         return []
+
+
+def fetch_minute(code):
+    """当日分时走势(腾讯minute接口), 返回 {rows, prev_close, date}
+    rows: [["0930", 价格, 该分钟成交量(手)], ...]"""
+    empty = {"rows": [], "prev_close": None, "date": ""}
+    try:
+        r = robust_get(f"https://ifzq.gtimg.cn/appstock/app/minute/query?code={code}",
+                       timeout=8)
+        node = r.json()["data"][code]
+        rows = []
+        for line in (node.get("data", {}) or {}).get("data") or []:
+            p = line.split()
+            # 15:00后为盘后固定价格交易/填充(价格不变), 分时图只展示连续竞价时段
+            if len(p) >= 3 and p[0] <= "1500":
+                rows.append([p[0], float(p[1]), int(float(p[2]))])
+        # 接口第3列是当日累计成交量(手), 差分为单分钟成交量
+        if len(rows) > 1 and all(
+                rows[i][2] >= rows[i - 1][2] for i in range(1, len(rows))):
+            for i in range(len(rows) - 1, 0, -1):
+                rows[i][2] = rows[i][2] - rows[i - 1][2]
+        prev = None
+        try:
+            prev = float(node["qt"][code][4])
+        except Exception:
+            pass
+        return {"rows": rows, "prev_close": prev,
+                "date": (node.get("data", {}) or {}).get("date", "")}
+    except Exception:
+        return empty
 
 
 def fetch_kline(code, tf="day", n=800):
@@ -1210,9 +1246,15 @@ class Handler(BaseHTTPRequestHandler):
                 stocks = load_cfg().get("stocks", [])
             self._json(stocks)
         elif u.path == "/api/quotes":
-            with CFG_LOCK:
-                stocks = load_cfg().get("stocks", [])
-            self._json(build_quotes(stocks))
+            # 支持 ?codes= 指定代码集(前端实时刷新当前选中标的用, 不拉主力资金流)
+            want = [c for c in parse_qs(u.query).get("codes", [""])[0].split(",") if c]
+            if want:
+                quotes = fetch_quotes(want)
+                self._json([_quote_item(c, quotes.get(c)) for c in want])
+            else:
+                with CFG_LOCK:
+                    stocks = load_cfg().get("stocks", [])
+                self._json(build_quotes(stocks))
         elif u.path == "/api/search":
             q = parse_qs(u.query).get("q", [""])[0]
             self._json(search_suggest(q))
@@ -1234,6 +1276,10 @@ class Handler(BaseHTTPRequestHandler):
                            "done": DIV_SCAN["done"], "total": DIV_SCAN["total"],
                            "rows": rows}
             self._json(payload)
+        elif u.path == "/api/kline/minute":
+            # 当日分时走势(交易时段前端8s轮询, 仅当前选中标的)
+            code = parse_qs(u.query).get("code", [""])[0]
+            self._json(fetch_minute(code))
         elif u.path == "/api/kline":
             q = parse_qs(u.query)
             code = q.get("code", [""])[0]

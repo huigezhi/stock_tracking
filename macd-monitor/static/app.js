@@ -147,8 +147,7 @@ function selectIdx(code) {
     document.getElementById('chAmount').textContent = (i.amount / 1e4).toFixed(2) + '亿';
     document.getElementById('chShares').textContent = '--';
   }
-  KChart.load(code, curTf);
-  ShareChart.load(code, curTf);
+  loadMainChart(code);
   renderWatchActive();
 }
 
@@ -253,23 +252,68 @@ function selectEtf(code) {
     document.getElementById('chAmount').textContent = (e.amount / 1e4).toFixed(2) + '亿';
     document.getElementById('chShares').textContent = e.shares + '亿份';
   }
-  KChart.load(code, curTf);
-  ShareChart.load(code, curTf);
+  loadMainChart(code);
   renderWatchActive();
 }
 
 /* ================= K线图 ================= */
 /* KChart/ShareChart 图表实现拆分至 chart.js(先于本文件加载) */
 let curTf = 'day';
+
+/* 按当前周期加载中栏主图(分时模式加载分时数据, 份额面板按日线口径) */
+function loadMainChart(code) {
+  if (curTf === 'min') {
+    KChart.tf = 'min';              // 触发KChart.draw转发到分时图
+    MinuteChart.load(code);
+    ShareChart.load(code, 'day');
+  } else {
+    KChart.load(code, curTf);
+    ShareChart.load(code, curTf);
+  }
+}
+
 function switchTf(tf) {
   curTf = tf;
   document.querySelectorAll('.tf').forEach(b =>
     b.classList.toggle('active', b.dataset.tf === tf));
-  if (curEtf) {
-    KChart.load(curEtf, tf);
-    ShareChart.load(curEtf, tf);
+  // 分时模式隐藏K线窗口滑条(分时图固定全天视图)
+  const slider = document.querySelector('.chart-slider');
+  if (slider) slider.style.display = tf === 'min' ? 'none' : '';
+  if (curEtf) loadMainChart(curEtf);
+  else if (tf === 'min') {
+    KChart.tf = 'min';
+    MinuteChart.draw();
   }
 }
+
+/* ================= 选中标的交易时段实时刷新 =================
+   分时模式: 8秒轮询当日分钟数据(仅当前选中标的一个请求);
+   日K模式: 用最新行情tick更新最后一根K线(优先SSE缓存, 未订阅时单码拉取)。
+   未选中的标的不发起任何请求。 */
+function isTradingNow() {
+  const d = new Date();
+  const day = d.getDay();
+  if (day === 0 || day === 6) return false;
+  const m = d.getHours() * 60 + d.getMinutes();
+  return (m >= 570 && m <= 690) || (m >= 780 && m <= 900);   // 9:30-11:30 / 13:00-15:00
+}
+
+async function liveTick() {
+  if (!curEtf || !isTradingNow() || document.hidden) return;
+  if (curTf === 'min') { MinuteChart.load(curEtf); return; }
+  if (curTf !== 'day') return;               // 周K实时tick意义不大, 不刷新
+  let q = quoteMap[curEtf];
+  if (!q || !q.price) {
+    // 选中标的不在SSE订阅集(如从底背离表格点开的股票), 单码拉取
+    try {
+      const r = await apiFetch('/api/quotes?codes=' + encodeURIComponent(curEtf));
+      const arr = await r.json();
+      if (Array.isArray(arr) && arr[0] && arr[0].ok) q = arr[0];
+    } catch (e) { return; }
+  }
+  if (q && q.price) KChart.liveTick(q);
+}
+setInterval(liveTick, 8000);
 
 /* ================= MACD 监控列表 ================= */
 let watchData = [];   // 自选列表原始数据(名称/分组)
@@ -308,8 +352,7 @@ function selectWatch(code) {
     document.getElementById('chAmount').textContent = '--';
   }
   document.getElementById('chShares').textContent = '--';
-  KChart.load(code, curTf);
-  ShareChart.load(code, curTf);
+  loadMainChart(code);
 }
 
 const watchItemHtml = (s, i) => `
