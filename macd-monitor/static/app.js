@@ -168,19 +168,71 @@ async function loadEtfList() {
   } catch (e) { /* 下轮重试 */ }
 }
 
-function renderEtfList() {
-  const box = document.getElementById('etfList');
-  if (!etfData.length) {
-    box.innerHTML = '<div class="empty">暂无符合条件的宽基ETF</div>';
-    return;
-  }
-  box.innerHTML = etfData.map(e => `
+/* ================= 列表分页(左右栏固定高度, 超出分页, 不无限增长) ================= */
+let etfPage = { n: 1, size: 0 };
+let watchPage = { n: 1, size: 0 };
+
+const etfItemHtml = e => `
     <div class="etf-item ${curEtf === e.code ? 'active' : ''}" onclick="selectEtf('${e.code}')">
       <span class="en">${esc(e.name)}</span>
       <span class="ep ${pctClass(e.chg_pct)}">${e.price.toFixed(3)}</span>
       <span class="ec">${esc(e.index)} · ${e.shares}亿份</span>
       <span class="epct ${pctClass(e.chg_pct)}">${fmtPct(e.chg_pct)}</span>
-    </div>`).join('');
+    </div>`;
+
+/* 以左栏宽基ETF面板底边线为基准, 对齐右栏监控列表高度 */
+function alignColumns() {
+  const etfPanel = document.querySelector('.etf-panel');
+  const watch = document.getElementById('watch');
+  if (!etfPanel || !watch) return;
+  const bottom = etfPanel.getBoundingClientRect().bottom;
+  const top = watch.getBoundingClientRect().top;
+  const cs = getComputedStyle(watch.closest('.monitor-panel'));
+  const pagerH = document.getElementById('watchPager').offsetHeight || 32;
+  const h = bottom - top - (parseFloat(cs.paddingBottom) || 0) - pagerH - 1;
+  if (h >= 120) watch.style.height = h + 'px';   // 窄屏堆叠布局下 h 为负, 走CSS默认高度
+}
+
+function renderPager(el, pg, pages) {
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    `<button ${pg.n <= 1 ? 'disabled' : ''} onclick="turnPage('${el.id}',-1)">‹ 上一页</button>` +
+    `<span class="pg-info">${pg.n} / ${pages} 页</span>` +
+    `<button ${pg.n >= pages ? 'disabled' : ''} onclick="turnPage('${el.id}',1)">下一页 ›</button>`;
+}
+
+function turnPage(id, d) {
+  if (id === 'etfPager') { etfPage.n += d; renderEtfList(); }
+  else { watchPage.n += d; renderWatchList(); }
+}
+
+/* 窗口尺寸变化: 重算左右栏每页条数并重新对齐底边线 */
+window.addEventListener('resize', () => {
+  etfPage.size = 0;
+  watchPage.size = 0;
+  renderEtfList();
+  renderWatchList();
+});
+
+function renderEtfList() {
+  const box = document.getElementById('etfList');
+  const pgEl = document.getElementById('etfPager');
+  if (!etfData.length) {
+    box.innerHTML = '<div class="empty">暂无符合条件的宽基ETF</div>';
+    pgEl.innerHTML = '';
+    return;
+  }
+  box.innerHTML = etfData.map(etfItemHtml).join('');   // 全量渲染一次以测量行高
+  if (!etfPage.size) {
+    const item = box.querySelector('.etf-item');
+    if (item) etfPage.size = Math.max(1, Math.floor(box.clientHeight / item.offsetHeight));
+  }
+  const pages = Math.max(1, Math.ceil(etfData.length / etfPage.size));
+  etfPage.n = Math.min(Math.max(1, etfPage.n), pages);
+  const start = (etfPage.n - 1) * etfPage.size;
+  if (etfPage.size < etfData.length)
+    box.innerHTML = etfData.slice(start, start + etfPage.size).map(etfItemHtml).join('');
+  renderPager(pgEl, etfPage, pages);
 }
 
 function selectEtf(code) {
@@ -260,18 +312,7 @@ function selectWatch(code) {
   ShareChart.load(code, curTf);
 }
 
-async function loadWatch() {
-  const r = await apiFetch('/api/stocks');
-  const stocks = await r.json();
-  watchData = stocks;
-  groups = [...new Set(stocks.map(s => s.group || '自选'))];
-  document.getElementById('count').textContent = stocks.length;
-  const box = document.getElementById('watch');
-  if (!stocks.length) {
-    box.innerHTML = '<div class="empty">暂无监控标的，请在上方搜索添加</div>';
-    return;
-  }
-  box.innerHTML = stocks.map((s, i) => `
+const watchItemHtml = (s, i) => `
     <div class="watch-item ${curEtf === s.code ? 'active' : ''}" data-code="${esc(s.code)}" onclick="selectWatch('${esc(s.code)}')">
       <span class="seq">${i + 1}</span>
       <span class="wname"><span class="n">${esc(s.name)}</span><span class="c">${esc(s.code)}</span></span>
@@ -281,10 +322,43 @@ async function loadWatch() {
       <span class="qcell qpct">--</span>
       <span class="qcell qflow"><span class="v">--</span><span class="l">--</span></span>
       <button class="del" onclick="event.stopPropagation();delStock('${esc(s.code)}')">删除</button>
-    </div>`).join('');
-  refreshQuotes();
+    </div>`;
+
+function renderWatchList() {
+  const box = document.getElementById('watch');
+  const pgEl = document.getElementById('watchPager');
+  alignColumns();   // 先对齐左栏ETF面板底边线, 再按高度分页
+  if (!watchData.length) {
+    box.innerHTML = '<div class="empty">暂无监控标的，请在上方搜索添加</div>';
+    pgEl.innerHTML = '';
+    return;
+  }
+  box.innerHTML = watchData.map(watchItemHtml).join('');   // 全量渲染一次以测量行高
+  if (!watchPage.size) {
+    const item = box.querySelector('.watch-item');
+    if (item) watchPage.size =
+      Math.max(1, Math.floor((box.clientHeight + 6) / (item.offsetHeight + 6)));
+  }
+  const pages = Math.max(1, Math.ceil(watchData.length / watchPage.size));
+  watchPage.n = Math.min(Math.max(1, watchPage.n), pages);
+  const start = (watchPage.n - 1) * watchPage.size;
+  const view = watchPage.size < watchData.length
+    ? watchData.slice(start, start + watchPage.size) : watchData;
+  box.innerHTML = view.map((s, i) => watchItemHtml(s, start + i)).join('');
+  renderPager(pgEl, watchPage, pages);
+  view.forEach(s => updateWatchRow(s.code));   // 行情来自quoteMap缓存, 不发请求
   updateIntradayBadges();
   updateResBadges();
+}
+
+async function loadWatch() {
+  const r = await apiFetch('/api/stocks');
+  const stocks = await r.json();
+  watchData = stocks;
+  groups = [...new Set(stocks.map(s => s.group || '自选'))];
+  document.getElementById('count').textContent = stocks.length;
+  renderWatchList();
+  refreshQuotes();
   ensureSSE();   // 自选变化后重连SSE(订阅代码集已变)
 }
 
@@ -802,8 +876,9 @@ function updateDivDateOptions() {
 
 /* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
 let divSort = {key: 'confirm', dir: 'desc'};
-const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc',
-                       chg3: 'sortChg3', chg5: 'sortChg5', score: 'sortScore'};
+const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc', chg3: 'sortChg3',
+                       chg5: 'sortChg5', score: 'sortScore', name: 'sortName', tf: 'sortTf',
+                       date2: 'sortDate2', price2: 'sortPrice2', dif2: 'sortDif2'};
 const TAG_LABELS = {vol_shrink: '缩量', ma_hold: '均线托底', rsi_repair: 'RSI修复',
                     kdj_gold: 'KDJ金叉', week_align: '周线同向', vol_engulf: '放量反包'};
 
