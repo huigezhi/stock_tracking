@@ -27,6 +27,7 @@ from monitor import (bar_complete, combine_resonance, detect_divergences,
                      recent_tf_signals, send_feishu_text)
 from monitor import macd as calc_macd
 import db
+import model as ml_model
 import net
 import obs
 from net import robust_get, fetch_quotes_any
@@ -974,6 +975,17 @@ def _scan_one_divs(stock, now):
 
             # 共振标签与加权分(纯本地计算)
             tags, score = _resonance(klines[:last + 1], closes, d["p1"], p2, cidx, tf)
+            # 元标签模型质量分(只用确认日及之前数据, 无未来函数)
+            ml_score = None
+            feats = ml_model.build_features(klines[:last + 1], {
+                "date1": bars[d["p1"]][0], "date2": bars[d["p2"]][0],
+                "price1": d["c1"], "price2": d["c2"],
+                "dif1": d["d1"], "dif2": d["d2"],
+                "score": score, "tags": ",".join(tags),
+                "confirm": bars[cidx][0], "confirm_close": closes[cidx],
+            })
+            if feats is not None:
+                ml_score = ml_model.model_score(feats)
             rows.append({
                 "code": code, "name": stock["name"], "price": stock["price"],
                 "tf": tf, "tf_name": tf_name,
@@ -985,6 +997,7 @@ def _scan_one_divs(stock, now):
                 "confirm": bars[cidx][0],
                 "confirm_close": closes[cidx],            # 跟踪基准: 确认日收盘
                 "score": score, "tags": ",".join(tags),
+                "ml_score": ml_score,
             })
         time.sleep(0.05)   # 轻微限速, 避免触发行情接口WAF
     return rows
@@ -1292,7 +1305,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(fetch_kline(code, tf, n))
         elif u.path == "/api/stats":
             # 复盘统计: 总览 + 周期/共振分/确认月份分层
-            self._json(db.stats())
+            st = db.stats()
+            # 模型元信息(含样本外walk-forward指标, 历史分层为样本内会偏乐观)
+            if ml_model.load_model():
+                m = ml_model._MODEL
+                st["ml_meta"] = {k: m.get(k) for k in
+                                 ("auc", "base_win", "n_samples", "trained_at", "wf")}
+            self._json(st)
         elif u.path == "/api/tags":
             # 共振标签定义(前端展示徽章用)
             self._json({"labels": TAG_LABELS, "weights": TAG_WEIGHTS})
@@ -1455,6 +1474,10 @@ def main():
                     help="清除今日底背离扫描结果并全量重扫")
     args = ap.parse_args()
     db.init()   # 建表 + 旧div_hist.json一次性导入 + 过期清理
+    if ml_model.load_model():   # 元标签信号质量模型(model.json, 由train_model.py生成)
+        m = ml_model._MODEL
+        print(f"信号质量模型已加载: AUC={m.get('auc')} 基线胜率={m.get('base_win')}%"
+              f" 样本={m.get('n_samples')} 训练于{m.get('trained_at')}")
     if args.rescan:
         _rescan_today()
     # 公网部署时建议 WEBUI_HOST=127.0.0.1 仅本机监听, 通过SSH隧道访问

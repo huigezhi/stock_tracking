@@ -863,7 +863,7 @@ function exportDivs() {
   if (!divFiltered.length) { toast('当前筛选无数据可导出'); return; }
   const head = ['代码', '名称', '周期', '现价', '低点1日期', '低点1价格', '低点2日期',
     '低点2价格', 'DIF1', 'DIF2', 'DIF增量', '后3日涨幅%', '后5日涨幅%',
-    '确认日', '共振标签', '共振分', '扫描日'];
+    '模型分', '确认日', '共振标签', '共振分', '扫描日'];
   const esc = v => {
     if (v === null || v === undefined) return '';
     v = String(v);
@@ -872,7 +872,7 @@ function exportDivs() {
   const lines = [head.join(',')];
   for (const r of divFiltered) {
     lines.push([r.code, r.name, r.tf_name, r.price, r.date1, r.price1, r.date2,
-      r.price2, r.dif1, r.dif2, r.dif_inc, r.chg3, r.chg5,
+      r.price2, r.dif1, r.dif2, r.dif_inc, r.chg3, r.chg5, r.ml_score,
       r.confirm, (r.tags || '').split(',').filter(Boolean)
         .map(t => TAG_LABELS[t] || t).join('/'),
       r.score, r.scan].map(esc).join(','));
@@ -920,7 +920,7 @@ function updateDivDateOptions() {
 /* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
 let divSort = {key: 'confirm', dir: 'desc'};
 const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc', chg3: 'sortChg3',
-                       chg5: 'sortChg5', score: 'sortScore', name: 'sortName', tf: 'sortTf',
+                       chg5: 'sortChg5', ml_score: 'sortMl', score: 'sortScore', name: 'sortName', tf: 'sortTf',
                        date2: 'sortDate2', price2: 'sortPrice2', dif2: 'sortDif2'};
 const TAG_LABELS = {vol_shrink: '缩量', ma_hold: '均线托底', rsi_repair: 'RSI修复',
                     kdj_gold: 'KDJ金叉', week_align: '周线同向', vol_engulf: '放量反包'};
@@ -957,11 +957,11 @@ function renderDivTable() {
   document.getElementById('divCount').textContent =
       divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
   if (!divAll.length) {
-    body.innerHTML = '<tr><td colspan="11" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="empty">暂无底背离标的</td></tr>';
     return;
   }
   if (!divFiltered.length) {
-    body.innerHTML = '<tr><td colspan="11" class="empty">无符合条件的标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="empty">无符合条件的标的</td></tr>';
     return;
   }
   let rows = divFiltered;
@@ -985,6 +985,12 @@ function renderDivTable() {
         `<span class="tagb" title="${TAG_LABELS[t] || t}">${TAG_LABELS[t] || t}</span>`).join('');
     return `<td class="dv dsc"><b class="${r.score >= 5 ? 'sc-hi' : r.score >= 3 ? 'sc-mid' : 'sc-lo'}">${r.score}</b>${badges}</td>`;
   };
+  const mlCell = r => {
+    if (r.ml_score == null) return '<td class="dv">--</td>';
+    const v = r.ml_score;
+    const cls = v >= 60 ? 'sc-hi' : v >= 40 ? 'sc-mid' : 'sc-lo';
+    return `<td class="dv"><b class="${cls}">${v.toFixed(0)}</b></td>`;
+  };
   body.innerHTML = rows.map((r, i) => `
     <tr class="div-row" onclick="viewDivIdx(${idxOf.get(r)})">
       <td class="di">${i + 1}</td>
@@ -996,6 +1002,7 @@ function renderDivTable() {
       <td class="dv">${r.dif_inc != null ? r.dif_inc.toFixed(3) : '--'}</td>
       <td class="dv">${fmtPct(r.chg3)}</td>
       <td class="dv">${fmtPct(r.chg5)}</td>
+      ${mlCell(r)}
       ${scoreCell(r)}
       <td class="dd">${r.confirm}</td>
     </tr>`).join('');
@@ -1035,6 +1042,17 @@ function closeStats() {
   document.getElementById('statsBox').style.display = 'none';
 }
 
+/* 模型样本外(walk-forward)指标说明: 上方历史分层为样本内打分, 会偏乐观;
+   此处以模型训练时的样本外评估为准 */
+function mlWfNote(meta) {
+  if (!meta || !meta.wf || !meta.wf.buckets || !meta.wf.buckets.length) return '';
+  const wf = meta.wf;
+  const buckets = wf.buckets.map(b =>
+    `模型分${b.key}: ${b.win}%`).join(' · ');
+  return `<div class="wf-note">样本外评估(walk-forward, ${wf.n}样本): AUC ${wf.auc}, 基线胜率 ${wf.base_win}% —— ${buckets}
+    <br><small>历史信号由全量模型回填打分(样本内), 上表分层偏乐观; 线上对新信号的打分应参考本行样本外口径。模型训练于 ${meta.trained_at}。</small></div>`;
+}
+
 function renderStats(s) {
   const body = document.getElementById('statsBody');
   if (!s || !s.total) {
@@ -1062,7 +1080,8 @@ function renderStats(s) {
     <tr><td>${m.key}</td><td>${m.n}</td><td>${wr(m.win5)}</td><td>${pc(m.avg5)}</td><td>${pc(m.avg20)}</td></tr>`).join('');
   body.innerHTML = `
     <div class="sc-note">信号总数 ${s.total} · 确认日期 ${s.from || '--'} ~ ${s.to || '--'} ·
-      胜率/收益均自<b>确认日收盘</b>起算(可实际入场点); 共振分越高代表多指标共振越强</div>
+      胜率/收益均自<b>确认日收盘</b>起算(可实际入场点); 共振分越高代表多指标共振越强;
+      模型分为元标签质量模型打分(0-100, 只用确认日前数据)</div>
     <div class="sc-cells">${[3, 5, 10, 20, 60].map(cell).join('')}</div>
     <h4>按周期 / 共振分分层</h4>
     <table class="stats-table">
@@ -1071,6 +1090,15 @@ function renderStats(s) {
       <th>20日胜率</th><th>20日均收</th><th>60日胜率</th><th>60日均收</th></tr></thead>
       <tbody>${rowsHtml(s.by_tf)}${rowsHtml(s.by_score)}</tbody>
     </table>
+    ${s.by_ml && s.by_ml.some(x => x.n3 > 0) ? `
+    <h4>按模型分分层(元标签信号质量模型)</h4>
+    <table class="stats-table">
+      <thead><tr><th>模型分</th><th>样本</th><th>3日胜率</th><th>3日均收</th>
+      <th>5日胜率</th><th>5日均收</th><th>10日胜率</th><th>10日均收</th>
+      <th>20日胜率</th><th>20日均收</th><th>60日胜率</th><th>60日均收</th></tr></thead>
+      <tbody>${rowsHtml(s.by_ml)}</tbody>
+    </table>
+    ${mlWfNote(s.ml_meta)}` : ''}
     <h4>按确认月份(近12个月)</h4>
     <table class="stats-table slim">
       <thead><tr><th>月份</th><th>信号数</th><th>5日胜率</th><th>5日均收</th><th>20日均收</th></tr></thead>

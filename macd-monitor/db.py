@@ -67,6 +67,10 @@ def init():
     """建表 + 旧JSON一次性导入 + 过期清理(启动时调用一次)"""
     with conn() as c:
         c.executescript(SCHEMA)
+        # 增量迁移: 模型质量分(元标签模型输出, 0-100, NULL=未打分)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(div_signal)")}
+        if "ml_score" not in cols:
+            c.execute("ALTER TABLE div_signal ADD COLUMN ml_score REAL")
     _migrate_legacy()
     prune()
 
@@ -103,25 +107,28 @@ def _migrate_legacy():
 
 
 def _upsert_signal(c, r):
-    """单条信号UPSERT: 保留scan_first/confirm_close(首次), 刷新其余快照字段"""
+    """单条信号UPSERT: 保留scan_first/confirm_close(首次), 刷新其余快照字段;
+    ml_score由扫描时的模型打分提供, 未提供时保留旧值"""
     c.execute(
         """INSERT INTO div_signal(code, tf, date2, name, price, date1, price1, price2,
                dif1, dif2, dif_inc, confirm, chg3, chg5, score, tags,
-               confirm_close, scan_first, scan_last)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               confirm_close, scan_first, scan_last, ml_score)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(code, tf, date2) DO UPDATE SET
                name=excluded.name, price=excluded.price, date1=excluded.date1,
                price1=excluded.price1, price2=excluded.price2,
                dif1=excluded.dif1, dif2=excluded.dif2, dif_inc=excluded.dif_inc,
                confirm=excluded.confirm, chg3=excluded.chg3, chg5=excluded.chg5,
                score=excluded.score, tags=excluded.tags,
-               scan_last=excluded.scan_last""",
+               scan_last=excluded.scan_last,
+               ml_score=COALESCE(excluded.ml_score, div_signal.ml_score)""",
         (r["code"], r["tf"], r["date2"], r.get("name"), r.get("price"),
          r.get("date1"), r.get("price1"), r.get("price2"),
          r.get("dif1"), r.get("dif2"), r.get("dif_inc"),
          r.get("confirm"), r.get("chg3"), r.get("chg5"),
          r.get("score", 0) or 0, r.get("tags", "") or "",
-         r.get("confirm_close"), r.get("scan_first"), r.get("scan_last")))
+         r.get("confirm_close"), r.get("scan_first"), r.get("scan_last"),
+         r.get("ml_score")))
     sig_id = c.execute(
         "SELECT id FROM div_signal WHERE code=? AND tf=? AND date2=?",
         (r["code"], r["tf"], r["date2"])).fetchone()
@@ -159,7 +166,7 @@ def div_rows(keep_days=30):
                       CASE tf WHEN 'day' THEN '日线' ELSE '周线' END AS tf_name,
                       date1, date2, price1, price2,
                       dif1, dif2, dif_inc, chg3, chg5, confirm, score, tags,
-                      scan_last AS scan
+                      ml_score, scan_last AS scan
                FROM div_signal
                WHERE scan_last >= date('now', ?)
                ORDER BY confirm DESC, code DESC""",
@@ -201,11 +208,12 @@ def update_track(signal_id, fwd):
 
 
 def _agg(c, where, params):
-    """聚合: 各周期样本数/胜率/平均收益(收益>0计胜)"""
+    """聚合: 各周期样本数/胜率/平均收益(收益>0计胜; NULL未成熟不计入胜率分母)"""
     sel = []
     for n in (3, 5, 10, 20, 60):
         sel.append(f"SUM(fwd{n} IS NOT NULL)")
-        sel.append(f"ROUND(AVG(CASE WHEN fwd{n}>0 THEN 1 ELSE 0 END)*100, 1)")
+        sel.append(f"ROUND(AVG(CASE WHEN fwd{n} IS NULL THEN NULL"
+                   f" WHEN fwd{n}>0 THEN 1.0 ELSE 0.0 END)*100, 1)")
         sel.append(f"ROUND(AVG(fwd{n}), 2)")
     row = c.execute(
         f"SELECT {','.join(sel)} FROM div_signal s JOIN signal_track t"
@@ -239,11 +247,20 @@ def stats():
             a = _agg(c, "s.score BETWEEN ? AND ?", (lo, hi))
             out["by_score"].append(
                 {"key": f"{lo}-{hi}", "name": f"共振分{lo}-{hi}", **a})
+        # 分层: 模型质量分(元标签模型, NULL=未打分单独一档)
+        out["by_ml"] = []
+        for lo, hi in ((0, 40), (40, 60), (60, 101)):
+            a = _agg(c, "s.ml_score >= ? AND s.ml_score < ?", (lo, hi))
+            out["by_ml"].append(
+                {"key": f"{lo}-{hi}", "name": f"模型分{lo}-{hi}", **a})
+        a = _agg(c, "s.ml_score IS NULL", ())
+        out["by_ml"].append({"key": "na", "name": "未打分", **a})
         # 分层: 确认月份(近12个月)
         out["by_month"] = []
         rows = c.execute(
             """SELECT substr(confirm,1,7) ym, COUNT(*) n,
-                      ROUND(AVG(CASE WHEN t.fwd5>0 THEN 1 ELSE 0 END)*100,1) win5,
+                      ROUND(AVG(CASE WHEN t.fwd5 IS NULL THEN NULL
+                                    WHEN t.fwd5>0 THEN 1.0 ELSE 0.0 END)*100,1) win5,
                       ROUND(AVG(t.fwd5),2) avg5,
                       ROUND(AVG(t.fwd20),2) avg20
                FROM div_signal s JOIN signal_track t ON t.signal_id=s.id
