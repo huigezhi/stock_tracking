@@ -975,6 +975,9 @@ def _next_scan_wait(now):
     return max(60.0, (target - now).total_seconds())
 
 
+SCAN_WORKERS = max(1, int(os.environ.get("SCAN_WORKERS", "16")))   # 全市场扫描并发数
+
+
 def _run_full_scan(scan_date):
     """全市场底背离扫描主体(16:00定时与前端"立即更新"手动触发共用), 返回是否成功"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -986,7 +989,7 @@ def _run_full_scan(scan_date):
         with DIV_LOCK:
             DIV_SCAN["total"] = len(stocks) * 2
         rows = []
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
             futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
             for fu in as_completed(futs):
                 try:

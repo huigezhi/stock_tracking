@@ -95,7 +95,7 @@
     <div class="div-panel">
       <div class="div-head">
         <h3>日线 / 周线底背离标的 <small>全部A股扫描 · 交易日16:00自动更新 · 可手动立即更新 · 仅最近100周期 · 点击行查看K线</small></h3>
-        <span class="upd"><button class="stats-btn" onclick="openStats()" title="信号胜率复盘统计">复盘统计</button><button class="stats-btn" id="divRescanBtn" onclick="triggerDivRescan()" title="立即重扫全市场底背离(不影响16:00定时扫描)">立即更新</button><span id="divUpd"></span></span>
+        <span class="upd"><button class="stats-btn" onclick="openStats()" title="信号胜率复盘统计">复盘统计</button><button class="stats-btn" id="divRescanBtn" onclick="triggerDivRescan()" title="立即重扫全市场底背离(不影响16:00定时扫描)">立即更新</button><button class="stats-btn" onclick="exportDivs()" title="将当前筛选结果导出为CSV(含Excel中文兼容)">导出</button><span id="divUpd"></span></span>
       </div>
       <div class="div-filters">
         <select id="divDate" onchange="applyDivFilters()" title="按扫描日期筛选"></select>

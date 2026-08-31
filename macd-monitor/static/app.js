@@ -741,6 +741,37 @@ async function triggerDivRescan() {
   }
 }
 
+/* 导出当前筛选结果为CSV(带BOM, Excel打开中文不乱码) */
+function exportDivs() {
+  if (!divFiltered.length) { toast('当前筛选无数据可导出'); return; }
+  const head = ['代码', '名称', '周期', '现价', '低点1日期', '低点1价格', '低点2日期',
+    '低点2价格', 'DIF1', 'DIF2', 'DIF增量', '后3日涨幅%', '后5日涨幅%',
+    '确认日', '共振标签', '共振分', '扫描日'];
+  const esc = v => {
+    if (v === null || v === undefined) return '';
+    v = String(v);
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  };
+  const lines = [head.join(',')];
+  for (const r of divFiltered) {
+    lines.push([r.code, r.name, r.tf_name, r.price, r.date1, r.price1, r.date2,
+      r.price2, r.dif1, r.dif2, r.dif_inc, r.chg3, r.chg5,
+      r.confirm, (r.tags || '').split(',').filter(Boolean)
+        .map(t => TAG_LABELS[t] || t).join('/'),
+      r.score, r.scan].map(esc).join(','));
+  }
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')],
+      {type: 'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  const ts = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  a.download = `底背离信号_${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}.csv`;
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(`已导出 ${divFiltered.length} 条信号`);
+}
+
 function renderDivs(d) {
   divAll = d.rows || [];
   const upd = document.getElementById('divUpd');

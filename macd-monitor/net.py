@@ -7,6 +7,7 @@
 - fetch_quotes_any: 腾讯批量行情 + 新浪逐个行情双源容灾
 """
 import json
+import os
 import re
 import threading
 import time
@@ -16,6 +17,9 @@ import requests
 import obs
 
 S = requests.Session()
+# 扫描为 bulk 消费方, 提高连接池避免高并发下反复建连
+S.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=32, pool_connections=32))
+S.mount("http://", requests.adapters.HTTPAdapter(pool_maxsize=32, pool_connections=32))
 
 # ---------------- 令牌桶限流 ----------------
 
@@ -44,7 +48,10 @@ class RateLimiter:
             time.sleep(wait)
 
 
-LIMITER = RateLimiter(rate=8, burst=16)   # 全局 8 req/s
+# 全局限流: 默认 16 req/s(全市场扫描 10422 请求约 11 分钟), 可用环境变量 NET_RATE 调整;
+# 腾讯行情接口对该速率容忍良好, 若触发 WAF 可调回 8
+_net_rate = max(1, int(os.environ.get("NET_RATE", "16")))
+LIMITER = RateLimiter(rate=_net_rate, burst=_net_rate * 2)
 
 
 def get(url, timeout=8, headers=None, **kw):
