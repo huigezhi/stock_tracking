@@ -684,13 +684,26 @@ CACHED_KLINE_CODES = set(INDEX_LIST) | set(BROAD_ETF_CANDIDATES)
 
 def _latest_expected_date(now):
     """按当前北京时间推断缓存应有的最新交易日:
-    周末取最近周五; 交易日16点前取上一工作日(只更新到收盘价); 16点后取当日"""
+    周末取最近周五; 交易日9:25开盘后取当日(含盘中未收盘K线), 之前取上一交易日"""
     d = now.date()
     if d.weekday() >= 5:
         d -= timedelta(days=d.weekday() - 4)
-    elif now.hour < 16:
+    elif now.hour < 9 or (now.hour == 9 and now.minute < 25):
         d -= timedelta(days=1 if d.weekday() else 3)
     return d.strftime("%Y-%m-%d")
+
+
+def _forming_bar_stale(entry, bars, now, now_ts):
+    """当日未收盘K线是否需要刷新: 盘中(bars含当日)每5分钟增量刷新一次,
+    保证日K/周K图盘中也能看到最新变动; 收盘后当日K线定型不再刷新"""
+    if not bars or bars[-1][0] != now.strftime("%Y-%m-%d"):
+        return False
+    if now.weekday() >= 5 or now.hour >= 15:
+        return False
+    return now_ts >= entry.get("next_check", 0)
+
+
+KLINE_FORMING_SEC = 300     # 盘中当日未收盘K线的增量刷新间隔
 
 
 def _iso_week(date_str):
@@ -716,6 +729,7 @@ def get_kline_cached(code, tf="day", n=800):
     n = max(60, min(int(n or 800), KLINE_KEEP))
     tf = tf if tf in ("day", "week") else "day"
     now_ts = time.time()
+    now_c = now_cst()
     with KLINE_LOCK:
         if not _KC["loaded"]:
             _KC["data"] = load_json(KLINE_CACHE_PATH, {})
@@ -723,9 +737,10 @@ def get_kline_cached(code, tf="day", n=800):
         entry = _KC["data"].get(code, {}).get(tf) or {}
         bars = list(entry.get("bars", []))
         prev_last = bars[-1][0] if bars else None
-        # 缓存已是最新交易日, 或处于校验冷却期(节假日/刚查过) → 不请求网络
-        if bars and (bars[-1][0] >= _latest_expected_date(now_cst())
-                     or now_ts < entry.get("next_check", 0)):
+        # 缓存已是最新交易日且(非盘中或当日K线未到刷新点) → 不请求网络
+        if bars and (bars[-1][0] >= _latest_expected_date(now_c)
+                     or now_ts < entry.get("next_check", 0)) \
+                and not _forming_bar_stale(entry, bars, now_c, now_ts):
             return bars[-n:]
         full_ts = entry.get("full_ts", 0)
     # 无缓存→全量拉取; 距上次全量超过一周→顺带全量(修正前复权); 其余只拉最近60根增量
@@ -738,9 +753,16 @@ def get_kline_cached(code, tf="day", n=800):
             if full:
                 entry["full_ts"] = now_ts
             new_last = entry["bars"][-1][0] if entry["bars"] else None
-            # 取到新数据1小时后可再校验; 未取到(节假日)冷却4小时
-            entry["next_check"] = now_ts + (KLINE_IDLE_RECHECK_SEC if new_last == prev_last
-                                            else KLINE_RECHECK_SEC)
+            # 盘中持有当日未收盘K线 → 5分钟后增量刷新(价格实时变);
+            # 盘中未取到新数据(停牌/未开盘) → 10分钟重试; 非交易日无新数据 → 冷却4小时
+            intraday = is_trading_time(now_cst())
+            if new_last == prev_last:
+                entry["next_check"] = now_ts + (600 if intraday else KLINE_IDLE_RECHECK_SEC)
+            else:
+                today = now_cst().strftime("%Y-%m-%d")
+                entry["next_check"] = now_ts + (KLINE_FORMING_SEC
+                                                if new_last == today and intraday
+                                                else KLINE_RECHECK_SEC)
         else:   # 拉取失败, 10分钟后重试
             entry["next_check"] = now_ts + 600
         tmp = KLINE_CACHE_PATH + ".tmp"
