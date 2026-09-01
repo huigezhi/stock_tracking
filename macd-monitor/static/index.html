@@ -24,7 +24,7 @@
     <option value="light">白天</option>
     <option value="dark">夜间</option>
   </select>
-  <button class="sys-btn" id="aiBtn" onclick="openAi()" title="AI选股: 每交易日18:00自动精选10只(模型分Top30候选 → DeepSeek)">AI选股</button>
+  <button class="sys-btn" id="aiBtn" onclick="openAi()" title="AI短线选股: 涨停池动能分Top30候选 → DeepSeek游资视角精选10只, 每交易日18:00自动">AI选股</button>
   <button class="sys-btn" id="sysBtn" onclick="openSys()" title="系统健康与事件日志">系统</button>
 </header>
 <div class="offline-banner" id="offlineBanner" style="display:none">
@@ -185,7 +185,7 @@
 <div class="ai-mask" id="aiBox" style="display:none" onclick="if(event.target===this)closeAi()">
   <div class="ai-card">
     <div class="ai-head">
-      <span class="login-title">AI 选股 · 每日 Top 10</span>
+      <span class="login-title">AI 短线选股 · 涨停板策略</span>
       <span class="ai-sub" id="aiSub"></span>
       <button class="stats-close" onclick="closeAi()">✕</button>
     </div>
@@ -196,11 +196,19 @@
         <button class="stats-btn" id="aiSaveBtn" onclick="saveAiCfg()">保存配置</button>
         <button class="stats-btn" id="aiTestBtn" onclick="testAi()">测试连接</button>
         <button class="stats-btn" id="aiRunBtn" onclick="runAiPick()">立即选股</button>
+        <button class="stats-btn" id="ztScanBtn" onclick="triggerZtScan()" title="手动抓取当日涨停/炸板/跌停股池(交易日15:20自动, 周末可补历史)">扫描涨停池</button>
         <button class="stats-btn ai-clear" onclick="clearAiKey()" title="清除已保存的API Key">清除Key</button>
       </div>
       <div class="ai-status" id="aiStatus">加载中…</div>
-      <div class="ai-tip">每个交易日 18:00（收盘后3小时）自动运行：元标签模型分 Top30 候选 → DeepSeek 精选 10 只胜率最高标的；未配置 Key 或 AI 调用失败时自动降级为模型分 Top10。候选已剔除科创板与 ST 股票。点击行查看K线。</div>
+      <div class="mood-strip" id="aiMood" style="display:none"></div>
+      <div class="ai-tabs">
+        <button class="ai-tab active" id="tabPicks" onclick="switchAiTab('picks')">AI 精选</button>
+        <button class="ai-tab" id="tabPool" onclick="switchAiTab('pool')">涨停股池</button>
+        <span class="ai-stats" id="aiStats"></span>
+      </div>
+      <div class="ai-tip">短线策略：每个交易日 15:20 抓取当日涨停股池（剔除 ST/科创板/北交所）并计算动能分与市场情绪温度；18:00 按动能分 Top30 候选 → DeepSeek 以游资视角精选次日胜率最高的 10 只。未配置 Key 时降级为动能分 Top10。点击行查看K线。</div>
       <div class="ai-picks" id="aiPicks">加载中…</div>
+      <div class="ai-picks" id="ztPool" style="display:none">加载中…</div>
     </div>
   </div>
 </div>

@@ -30,6 +30,7 @@ import db
 import model as ml_model
 import net
 import obs
+import zt
 from net import robust_get, fetch_quotes_any
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1291,13 +1292,12 @@ def _track_backfill():
             time.sleep(600)
 
 
-# ---------------- AI选股(元标签模型 + deepseek精选) ----------------
-# 每个交易日收盘后3小时(18:00): 从近期确认的日线底背离信号(剔除科创板/ST)中,
-# 按元标签模型分取前30候选 → deepseek精选10只胜率最高; 无key/AI失败降级为模型分Top10
+# ---------------- AI短线选股(涨停池 + deepseek游资精选) ----------------
+# 每个交易日收盘后3小时(18:00): 当日涨停股池(剔除科创板/ST/北交所)按短线动能分
+# 取前30候选 → deepseek以游资视角精选10只次日胜率最高; 无key/AI失败降级为动能分Top10
 
 AI_PICK_HOUR = 18          # 收盘15:00 + 3小时
-AI_POOL_DAYS = 7            # 候选池: 近7个自然日内确认的信号(当日不足自动向近期扩展)
-AI_CAND_N = 30              # 送入AI的候选数量
+AI_CAND_N = 30              # 送入AI的候选数量(自涨停池动能分Top N)
 AI_TOP_N = 10               # 最终选股数量
 AI_STATE = {"running": False, "msg": "", "ts": 0}
 AI_RUN_NOW = threading.Event()
@@ -1326,37 +1326,103 @@ def _save_ai_cfg(api_key=None, model=None, clear_key=False):
         save_cfg(cfg)
 
 
-def _ai_candidates():
-    """候选池: 近AI_POOL_DAYS确认的日线底背离(不足AI_CAND_N只时自动放宽窗口,
-    7→14→30天), 剔除科创板(688/689)与ST; 同一标的取模型分最高的一条, 按模型分降序"""
-    with db.conn() as c:
-        rows = []
-        for days in (AI_POOL_DAYS, AI_POOL_DAYS * 2, 30):   # 逐级放宽时间窗
-            rows = c.execute(
-                """SELECT code, name, price, confirm, score, tags, ml_score,
-                          dif_inc, price1, price2, date2
-                   FROM div_signal
-                   WHERE tf='day' AND ml_score IS NOT NULL
-                     AND confirm >= date('now', ?)
-                   ORDER BY ml_score DESC""",
-                (f"-{days} day",)).fetchall()
-            if len(rows) >= AI_CAND_N:
-                break
-    best, seen = [], {}
-    for r in rows:
-        code, name = r["code"] or "", (r["name"] or "")
-        num = code[2:]
-        if num.startswith(("688", "689")):      # 科创板
-            continue
-        if "ST" in name.upper():                # ST/*ST/S*ST
-            continue
-        if code in seen:                        # 同标的保留模型分最高
-            continue
-        seen[code] = 1
-        best.append(dict(r))
-        if len(best) >= AI_CAND_N:
-            break
-    return best
+# ---------------- 涨停池扫描(东财三池) ----------------
+# 交易日15:20后抓当日涨停/炸板/跌停股池入库, 并计算情绪温度;
+# AI选股(18:00)以此为候选; 前端"AI选股"面板展示全池与情绪
+
+ZT_SCAN_HOUR = 15   # 收盘后数据就绪即扫(15:20)
+ZT_SCAN = {"scanning": False, "ts": 0}
+ZT_SCAN_NOW = threading.Event()
+
+
+def run_zt_scan(force=False):
+    """抓取(今日或最近交易日)涨停池入库, 返回 (ok, date|msg)"""
+    if ZT_SCAN["scanning"]:
+        return False, "涨停池扫描进行中"
+    ZT_SCAN["scanning"] = True
+    try:
+        now = now_cst()
+        day = zt.fetch_day(now.strftime("%Y%m%d"))   # 接口仅接受YYYYMMDD
+        if not day:
+            return False, f"{now:%Y-%m-%d} 涨停池无数据(非交易日或数据未就绪)"
+        day["date"] = now.strftime("%Y-%m-%d")       # 库内统一YYYY-MM-DD
+        day = zt.score_pool(day)
+        mood = zt.mood_of(day)
+        db.save_zt_day(day, mood)
+        ZT_SCAN["ts"] = time.time()
+        obs.record("INFO", "zt",
+                   f"涨停池入库: {day['date']} 涨停{mood['zt_n']} 跌停{mood['dt_n']}"
+                   f" 炸板{mood['zb_n']} 最高{mood['max_lbc']}连板 情绪{mood['temp']}({mood['stage']})")
+        return True, day["date"]
+    except Exception as e:
+        obs.record("ERROR", "zt", f"涨停池扫描失败: {e!r}")
+        return False, f"涨停池扫描失败: {e!r}"
+    finally:
+        ZT_SCAN["scanning"] = False
+
+
+def _zt_scanner():
+    """后台线程: 交易日15:20后抓当日涨停池(当日已扫过跳过); 手动可随时触发"""
+    while True:
+        try:
+            now = now_cst()
+            target = now.replace(hour=ZT_SCAN_HOUR, minute=20,
+                                 second=0, microsecond=0)
+            if now < target:
+                ZT_SCAN_NOW.wait(max(60.0, (target - now).total_seconds()))
+                ZT_SCAN_NOW.clear()
+                continue
+            today = now.strftime("%Y-%m-%d")
+            manual = ZT_SCAN_NOW.is_set()
+            ZT_SCAN_NOW.clear()
+            if manual or (now.weekday() < 5 and _is_trading_day(today)
+                          and db.last_zt_date() != today):
+                run_zt_scan()
+            if not manual:
+                ZT_SCAN_NOW.wait(_zt_next_wait(now_cst()))
+        except Exception as e:
+            obs.record("ERROR", "zt", f"涨停池线程异常: {e!r}")
+            time.sleep(300)
+
+
+def _zt_next_wait(now):
+    """距下一个15:20的秒数"""
+    t = now.replace(hour=ZT_SCAN_HOUR, minute=20, second=0, microsecond=0)
+    if now >= t:
+        t += timedelta(days=1)
+    return max(60.0, (t - now).total_seconds())
+
+
+def _zt_day_for_pick():
+    """选股用的涨停池数据: 今日库内→(缺则现场抓)→最近一份(<=7天); 返回 (date, rows, mood)"""
+    today = now_cst().strftime("%Y-%m-%d")
+    d = db.last_zt_date()
+    if d != today:
+        run_zt_scan()   # 手动选股时今日池未入库则现场抓一次
+        d = db.last_zt_date()
+    if not d or d < (now_cst() - timedelta(days=7)).strftime("%Y-%m-%d"):
+        return None, [], None
+    d, rows = db.zt_pool_rows(d)
+    return d, rows, db.zt_mood_of(d)
+
+
+def _ai_candidates(cands_rows):
+    """候选构造: 涨停池按短线动能分取前AI_CAND_N, 附extra结构字段"""
+    out = []
+    for r in cands_rows[:AI_CAND_N]:
+        c = {
+            "code": r["code"], "name": r["name"], "price": r["price"],
+            "score": r["score"], "tags": r["tags"],
+            "extra": {k: r[k] for k in
+                      ("pct", "ltsz", "hs", "lbc", "fbt", "zbc",
+                       "days", "ct", "hybk", "fund")
+                      if k in r},
+        }
+        c["extra"]["seal"] = (round(r["fund"] / r["ltsz"] * 100, 2)
+                              if r.get("ltsz") else 0)
+        c["extra"]["fbt_s"] = f"{r['fbt'] // 100:02d}:{r['fbt'] % 100:02d}"
+        out.append(c)
+    return out
 
 
 def _ds_headers(key):
@@ -1375,27 +1441,40 @@ def _ds_call(key, model, messages, timeout=90, max_tokens=2000):
     return r.json()["choices"][0]["message"]["content"]
 
 
-def _ai_pick_prompt(cands):
-    """构造候选清单与选股指令"""
+def _ai_pick_prompt(cands, mood, pool_date):
+    """构造游资视角的短线选股指令: 情绪周期定位 + 涨停结构分析"""
     lines = []
     for i, c in enumerate(cands, 1):
-        ml = f"{c['ml_score']:.0f}" if c.get("ml_score") is not None else "--"
-        sc = c.get("score")
-        sc = f"{sc:.0f}" if sc is not None else "--"
-        drop = ((c["price2"] / c["price1"] - 1) * 100
-                if c.get("price1") and c.get("price2") else 0)
+        e = c.get("extra") or {}
+        lbc = e.get("lbc") or 1
+        zttj = f"{e.get('days')}天{e.get('ct')}板" if e.get("days") and e.get("ct") and e["ct"] < e["days"] else f"{lbc}连板"
         lines.append(
-            f"{i}. {c['code']} {c['name']} 现价{c['price'] or '--'} "
-            f"模型分{ml} 共振分{sc} 背离低点{c['date2']} 前低跌幅{drop:.1f}% "
-            f"确认日{c['confirm']} DIF增量{c.get('dif_inc') or 0:.3f}")
-    return f"""你是专业的A股量化分析师。以下是全市场MACD日线底背离信号(已剔除科创板与ST股票)。
-其中「模型分」是元标签机器学习模型(三重障碍标注+walk-forward验证, 样本外AUC 0.66)对信号历史胜率的估计(0-100, 越高越好), 「共振分」是多指标共振强度(KDJ金叉/周线同向/放量反包等加权)。
+            f"{i}. {c['code']} {c['name']} [{zttj}] 现价{c['price']} 涨幅+{e.get('pct', 0):.1f}% "
+            f"换手{e.get('hs', 0):.1f}% 流通市值{e.get('ltsz', 0):.0f}亿 "
+            f"封板{e.get('fbt_s', '--')} 炸板{e.get('zbc', 0)}次 "
+            f"封单{e.get('fund', 0):.1f}亿({e.get('seal', 0):.1f}%流通) "
+            f"行业:{e.get('hybk') or '--'} 动能分{c.get('score', 0):.0f}")
+    mood_txt = "未知"
+    if mood:
+        mood_txt = (f"涨停{mood['zt_n']}家, 跌停{mood['dt_n']}家, 炸板率{mood['zb_rate']}%, "
+                    f"最高{mood['max_lbc']}连板, 2板以上{mood['lbc2_n']}家, "
+                    f"情绪温度{mood['temp']}/100({mood['stage']}期)")
+    return f"""你是顶级的A股短线游资操盘手, 精通情绪周期与龙头战法。
+以下是{pool_date}的涨停股池数据(已剔除ST/科创板/北交所), 按「短线动能分」降序排列(封板时间/炸板次数/换手/市值/封单强度/连板结构/板块效应加权, 0-100)。
 
-候选信号列表:
+当日市场情绪: {mood_txt}
+
+候选列表:
 {chr(10).join(lines)}
 
-请综合模型分、共振分、背离结构(前低跌幅/DIF增量)与你的A股市场经验, 从中选出{AI_TOP_N}只未来5-10个交易日胜率(上涨概率)最高的标的。
-选择原则: 模型分与共振分是核心依据, 避免集中在单一行业, 剔除你判断有明显利空风险(如连续一字跌停打开、退市风险)的标的。
+任务: 从中选出明日({pool_date}后一个交易日)最可能继续上涨的{AI_TOP_N}只标的, 追求次日收盘胜率最高。
+选股原则(游资视角):
+1. 情绪周期定位: 冰点/退潮期只留最强龙头与低位首板, 高度板谨慎; 发酵/强势期可上2-3板确认动量
+2. 板块效应优先: 当日多只同板块涨停的主线核心票人气最足
+3. 首板看质量: 封板早(10:30前)/封单大/换手5-15%/炸板少; 尾盘板(14:30后)与烂板(炸板2次+)坚决剔除
+4. 连板看人气: 2板确认动量, 3板以上吃溢价但注意高度风险, 创业板20cm的3板以上透支严重
+5. 规避: 高位放量滞涨的独苗票, 无板块效应的孤立板, 尾盘偷袭板
+6. 行业分散, 同一板块最多3只
 严格只输出一个JSON数组, 不要输出任何其他文字, 格式:
 [{{"code": "sh600000", "reason": "一句话核心理由, 30字以内"}}, ...]
 必须恰好{AI_TOP_N}项, code必须完全来自上面候选列表。"""
@@ -1429,17 +1508,17 @@ def _parse_ai_picks(text, cands):
 
 
 def run_ai_pick():
-    """执行一次AI选股(定时/手动共用): 模型分候选 → deepseek精选; 降级为模型分Top10。
-    返回 (ok, msg)"""
+    """执行一次AI短线选股(定时/手动共用): 当日涨停池动能分Top30候选 →
+    deepseek游资视角精选10只; 无key/AI失败降级为动能分Top10。返回 (ok, msg)"""
     if AI_STATE["running"]:
         return False, "选股进行中, 请稍候"
     AI_STATE["running"] = True
     try:
-        today = now_cst().strftime("%Y-%m-%d")
-        cands = _ai_candidates()
-        if not cands:
-            AI_STATE.update(msg="近期无符合条件的底背离信号", ts=time.time())
-            return False, "近期无符合条件的底背离信号(已剔除科创板/ST)"
+        pool_date, pool_rows, mood = _zt_day_for_pick()
+        if not pool_date or not pool_rows:
+            AI_STATE.update(msg="无可用涨停池数据(非交易日或接口异常)", ts=time.time())
+            return False, "无可用涨停池数据(非交易日或接口异常)"
+        cands = _ai_candidates(pool_rows)
         ai = _ai_cfg()
         key = ai.get("api_key", "")
         model = ai.get("model") or DS_DEFAULT_MODEL
@@ -1448,7 +1527,7 @@ def run_ai_pick():
             try:
                 text = _ds_call(key, model,
                                 [{"role": "user",
-                                  "content": _ai_pick_prompt(cands)}])
+                                  "content": _ai_pick_prompt(cands, mood, pool_date)}])
                 picks = _parse_ai_picks(text, cands)
                 if len(picks) < AI_TOP_N:
                     obs.record("WARN", "ai",
@@ -1458,10 +1537,10 @@ def run_ai_pick():
                     source = "ai"
             except Exception as e:
                 obs.record("WARN", "ai", f"deepseek调用失败: {e!r}")
-                msg = f"AI调用失败({e!r}), 已降级为模型分Top10; "
+                msg = f"AI调用失败({e!r}), 已降级为动能分Top10; "
         else:
-            msg = "未配置API Key, 使用模型分Top10; "
-        # AI结果不足10只时用候选池(模型分序)补齐
+            msg = "未配置API Key, 使用动能分Top10; "
+        # AI结果不足10只时用候选池(动能分序)补齐
         picks = picks or []
         if len(picks) < AI_TOP_N:
             chosen = {p["code"] for p in picks}
@@ -1470,16 +1549,17 @@ def run_ai_pick():
                     break
                 if c["code"] not in chosen:
                     p = dict(c)
-                    p.setdefault("reason", "模型分Top候选")
+                    p.setdefault("reason", "动能分Top候选")
                     picks.append(p)
                     chosen.add(c["code"])
         for p in picks:
             p["source"] = source
-        db.save_ai_picks(today, picks)
-        AI_STATE.update(msg=f"{today} 选股完成: {len(picks)}只 ({source})",
+        db.save_ai_picks(pool_date, picks)
+        mood_s = f"情绪{mood['temp']}({mood['stage']})" if mood else ""
+        AI_STATE.update(msg=f"{pool_date} 选股完成: {len(picks)}只 ({source}) {mood_s}",
                         ts=time.time())
-        obs.record("INFO", "ai", f"AI选股完成: {today} {len(picks)}只, 来源={source}")
-        return True, f"{today} 选股完成: {len(picks)}只 ({source})"
+        obs.record("INFO", "ai", f"AI短线选股完成: {pool_date} {len(picks)}只, 来源={source}")
+        return True, f"{pool_date} 选股完成: {len(picks)}只 ({source})"
     except Exception as e:
         obs.record("ERROR", "ai", f"AI选股失败: {e!r}")
         AI_STATE.update(msg=f"选股失败: {e!r}", ts=time.time())
@@ -1523,6 +1603,59 @@ def _ai_pick_loop():
         except Exception as e:
             obs.record("ERROR", "ai", f"AI选股线程异常: {e!r}")
             time.sleep(300)
+
+
+# ---------------- AI选股成绩跟踪 ----------------
+
+PICK_TRACK_HOUR = 17   # 每日17:00后回填(当日K线已收盘)
+
+
+def _pick_track_loop():
+    """后台线程: 每日17点后对历史选股回填次日/3日/5日收盘收益(自选股日收盘价起算),
+    用于验证短线策略真实胜率"""
+    while True:
+        try:
+            now = now_cst()
+            target = now.replace(hour=PICK_TRACK_HOUR, minute=30,
+                                 second=0, microsecond=0)
+            if now < target:
+                time.sleep(max(60.0, (target - now).total_seconds()))
+                continue
+            pending = db.pending_pick_track()
+            groups = {}
+            for p in pending:
+                groups.setdefault(p["code"], []).append(p)
+            for code, picks in groups.items():
+                try:
+                    klines = fetch_kline(code, "day", 40)
+                except Exception:
+                    continue
+                if len(klines) < 5:
+                    continue
+                dates = [k[0] for k in klines]
+                closes = [k[2] for k in klines]
+                for p in picks:
+                    if p["pick_date"] not in dates:   # 选股日K线已滚出窗口
+                        continue
+                    i0 = dates.index(p["pick_date"])
+                    base = p["price"] or closes[i0]
+                    if not base:
+                        continue
+                    fwd = {}
+                    for n in (1, 3, 5):
+                        j = i0 + n
+                        fwd[f"fwd{n}"] = (round((closes[j] / base - 1) * 100, 2)
+                                           if j < len(closes) else None)
+                    db.update_pick_track(p["pick_date"], p["code"], fwd)
+                time.sleep(0.1)   # 轻微限速
+            # 休眠到明日17:30
+            nxt = now_cst().replace(hour=PICK_TRACK_HOUR, minute=30,
+                                    second=0, microsecond=0)
+            if now_cst() >= nxt:
+                nxt += timedelta(days=1)
+            time.sleep(max(60.0, (nxt - now_cst()).total_seconds()))
+        except Exception:
+            time.sleep(600)
 
 
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -1709,12 +1842,19 @@ class Handler(BaseHTTPRequestHandler):
                 "default_model": DS_DEFAULT_MODEL,
             })
         elif u.path == "/api/ai/picks":
-            # 最近一次选股结果 + 运行状态
+            # 最近一次选股结果 + 运行状态 + 近30日成绩统计
             d, rows = db.ai_picks_latest()
             self._json({"running": AI_STATE["running"], "date": d,
                         "rows": rows, "msg": AI_STATE["msg"],
                         "ts": AI_STATE["ts"], "top_n": AI_TOP_N,
-                        "hour": AI_PICK_HOUR})
+                        "hour": AI_PICK_HOUR, "stats": db.pick_hist_stats(30)})
+        elif u.path == "/api/zt/pool":
+            # 涨停股池明细+当日情绪(短线策略看板); ?date=YYYY-MM-DD 可查历史
+            q = parse_qs(u.query)
+            date = q.get("date", [""])[0] or None
+            d, rows = db.zt_pool_rows(date)
+            self._json({"date": d, "rows": rows, "mood": db.zt_mood_of(d),
+                        "scanning": ZT_SCAN["scanning"], "ts": ZT_SCAN["ts"]})
         elif u.path == "/api/ai/run":
             # 手动选股: 由选股线程异步执行(可能含deepseek调用, 秒级到分钟级)
             if AI_STATE["running"]:
@@ -1848,6 +1988,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False,
                             "msg": f"连接失败: {e}{'; ' + detail if detail else ''}"})
             return
+        if u.path == "/api/zt/scan":
+            # 手动触发涨停池扫描(非定时窗口也可, 如周末补数据)
+            if not self._auth_guard():
+                return
+            if ZT_SCAN["scanning"]:
+                self._json({"ok": False, "msg": "涨停池扫描进行中, 请稍候"})
+            else:
+                ZT_SCAN_NOW.set()
+                self._json({"ok": True, "msg": "已触发涨停池扫描"})
+            return
         if u.path == "/api/div/rescan":
             # 前端"立即更新"按钮: 唤醒扫描线程手动全量重扫(不影响16:00定时扫描)
             if not self._auth_guard():
@@ -1939,6 +2089,8 @@ def main():
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
     threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
     threading.Thread(target=_ai_pick_loop, daemon=True).start()  # 每日18:00 AI选股(收盘+3小时)
+    threading.Thread(target=_zt_scanner, daemon=True).start()  # 每日15:20涨停池扫描(短线策略数据源)
+    threading.Thread(target=_pick_track_loop, daemon=True).start()  # 每日17:30选股成绩回填
     threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览
     print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()

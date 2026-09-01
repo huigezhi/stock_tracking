@@ -793,16 +793,21 @@ let aiTimer = null;
 let aiTicks = 0;
 let aiRunning = false;
 let aiPickRows = [];
+let ztPoolRows = [];
+let ztDate = null;
+let aiTab = 'picks';
 
 function openAi() {
   document.getElementById('aiBox').style.display = 'flex';
   loadAiConfig();
   loadAiPicks();
+  loadZtPool();
   clearInterval(aiTimer);
   aiTicks = 0;
   aiTimer = setInterval(() => {
     aiTicks++;
-    if (aiRunning || aiTicks % 10 === 0) loadAiPicks();   // 运行中3秒/空闲30秒
+    if (aiRunning) { loadAiPicks(); loadZtPool(); }
+    else if (aiTicks % 10 === 0) loadAiPicks();   // 运行中3秒/空闲30秒
   }, 3000);
 }
 
@@ -920,8 +925,29 @@ async function loadAiPicks() {
   } catch (e) { /* 面板打开期间网络抖动忽略, 下轮刷新 */ }
 }
 
-const AI_SRC_NAMES = {ai: 'DeepSeek 精选', model: '模型分 Top10（降级）',
-                      'ai+model': 'AI 精选 + 模型补齐'};
+async function triggerZtScan() {
+  const btn = document.getElementById('ztScanBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/zt/scan', {method: 'POST'});
+    const d = await r.json();
+    toast(d.msg || '已触发');
+    if (d.ok) setTimeout(loadZtPool, 3000);   // 扫描约需数秒
+  } catch (e) {
+    toast('触发失败, 请重试');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const AI_SRC_NAMES = {ai: 'DeepSeek 游资精选', model: '动能分 Top10（降级）',
+                      'ai+model': 'AI 精选 + 动能分补齐'};
+
+function _zttjTxt(e) {
+  const lbc = e.lbc || 1;
+  if (e.days && e.ct && e.ct < e.days) return `${e.days}天${e.ct}板`;
+  return lbc >= 2 ? `${lbc}连板` : '首板';
+}
 
 function renderAiPicks(d) {
   aiPickRows = d.rows || [];
@@ -933,10 +959,20 @@ function renderAiPicks(d) {
     st.className = 'ai-status run';
   } else if (d.msg) {
     st.textContent = d.msg;
-    st.className = 'ai-status ' + (/失败|无符合/.test(d.msg) ? 'err' : 'ok');
+    st.className = 'ai-status ' + (/失败|无可用/.test(d.msg) ? 'err' : 'ok');
   } else {
     st.textContent = '尚未运行过选股';
     st.className = 'ai-status';
+  }
+  // 近30日成绩统计(胜率/平均收益)
+  const s = d.stats, el = document.getElementById('aiStats');
+  if (s && s.n) {
+    const cell = (w, a) => w == null ? '--' : `${w}% / ${a > 0 ? '+' : ''}${a}%`;
+    el.innerHTML = `近30日 ${s.n} 只 · 次日 <b>${cell(s.win1, s.avg1)}</b>` +
+        ` · 3日 <b>${cell(s.win3, s.avg3)}</b> · 5日 <b>${cell(s.win5, s.avg5)}</b>`;
+    el.title = '胜率 / 平均收益(自选股日涨停价起算)';
+  } else {
+    el.textContent = '';
   }
   const box = document.getElementById('aiPicks');
   if (!d.date || !aiPickRows.length) {
@@ -945,25 +981,30 @@ function renderAiPicks(d) {
     return;
   }
   const src = aiPickRows[0].source || 'model';
-  const mlCell = v => v == null ? '<td class="dv">--</td>' :
-      `<td class="dv dsc"><b class="${v >= 60 ? 'sc-hi' : v >= 40 ? 'sc-mid' : 'sc-lo'}">${v.toFixed(0)}</b></td>`;
   box.innerHTML =
-    `<div class="ai-date">${d.date} · 共 ${aiPickRows.length} 只 · ` +
+    `<div class="ai-date">${d.date} 涨停池 · 共 ${aiPickRows.length} 只 · ` +
     `<span class="ai-src src-${esc(src)}">${AI_SRC_NAMES[src] || esc(src)}</span></div>` +
     '<table class="ai-table"><thead><tr>' +
-    '<th>#</th><th>股票</th><th>现价</th>' +
-    '<th title="元标签模型质量分(0-100), 越高历史同类信号胜率越高">模型分</th>' +
-    '<th title="多指标共振强度(KDJ金叉/周线同向等加权)">共振分</th><th>入选理由</th>' +
+    '<th>#</th><th>股票</th><th>结构</th><th title="当日封板时间, 越早越强">封板</th>' +
+    '<th title="当日换手率%">换手</th><th title="流通市值(亿)">市值</th>' +
+    '<th title="当日同行业涨停家数">行业</th>' +
+    '<th title="短线动能分(封板时间/炸板/换手/市值/封单/连板/板块效应加权)">动能分</th><th>入选理由</th>' +
     '</tr></thead><tbody>' +
-    aiPickRows.map((r, i) => `
+    aiPickRows.map((r, i) => {
+      const e = r.extra || {};
+      return `
       <tr onclick="viewAiPick(${i})">
         <td class="ai-rank">${i + 1}</td>
         <td class="dstock"><span class="dn">${esc(r.name || r.code)}</span><span class="dc">${r.code}</span></td>
-        <td class="dv">${r.price != null ? r.price.toFixed(2) : '--'}</td>
-        ${mlCell(r.ml_score)}
-        <td class="dv">${r.score != null ? r.score.toFixed(0) : '--'}</td>
+        <td class="dv">${esc(_zttjTxt(e))}</td>
+        <td class="dv">${esc(e.fbt_s || '--')}</td>
+        <td class="dv">${e.hs != null ? e.hs.toFixed(1) + '%' : '--'}</td>
+        <td class="dv">${e.ltsz != null ? e.ltsz.toFixed(0) : '--'}</td>
+        <td class="dv" title="${esc(e.hybk || '--')}">${esc(e.hybk || '--')}</td>
+        <td class="dv dsc"><b class="${r.score >= 75 ? 'sc-hi' : r.score >= 60 ? 'sc-mid' : 'sc-lo'}">${r.score != null ? r.score.toFixed(0) : '--'}</b></td>
         <td class="ai-reason">${esc(r.reason || '--')}</td>
-      </tr>`).join('') +
+      </tr>`;
+    }).join('') +
     '</tbody></table>';
 }
 
@@ -975,6 +1016,95 @@ function viewAiPick(i) {
   document.getElementById('chName').textContent = r.name || r.code;
   document.getElementById('chCode').textContent = r.code;
   document.getElementById('chIndex').textContent = 'AI选股 Top' + (i + 1);
+  ['chPrice', 'chChg'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '--';
+    el.className = el.id;
+  });
+  document.getElementById('chAmount').textContent = '--';
+  document.getElementById('chShares').textContent = '--';
+  switchTf('day');
+}
+
+/* ---------- 涨停股池 Tab + 情绪面板 ---------- */
+
+function switchAiTab(tab) {
+  aiTab = tab;
+  document.getElementById('tabPicks').classList.toggle('active', tab === 'picks');
+  document.getElementById('tabPool').classList.toggle('active', tab === 'pool');
+  document.getElementById('aiPicks').style.display = tab === 'picks' ? '' : 'none';
+  document.getElementById('ztPool').style.display = tab === 'pool' ? '' : 'none';
+}
+
+async function loadZtPool() {
+  try {
+    const r = await apiFetch('/api/zt/pool');
+    renderZtPool(await r.json());
+  } catch (e) { /* 面板打开期间网络抖动忽略, 下轮刷新 */ }
+}
+
+const MOOD_CLS = {up: 'mood-up', down: 'mood-down', '': ''};
+
+function renderZtPool(d) {
+  ztPoolRows = d.rows || [];
+  ztDate = d.date;
+  renderMood(d.mood);
+  const box = document.getElementById('ztPool');
+  if (!d.date || !ztPoolRows.length) {
+    box.innerHTML = `<div class="empty">暂无涨停池数据：交易日 15:20 后自动抓取，` +
+        `或点击「扫描涨停池」手动触发${d.scanning ? '（扫描中…）' : ''}</div>`;
+    return;
+  }
+  box.innerHTML =
+    `<div class="ai-date">${d.date} 涨停股池 · 共 ${ztPoolRows.length} 只 · ` +
+    `按动能分降序（剔除 ST/科创板/北交所）</div>` +
+    '<table class="ai-table zt-table"><thead><tr>' +
+    '<th>#</th><th>股票</th><th>结构</th><th title="当日封板时间, 越早越强">封板</th>' +
+    '<th title="当日炸板次数, 越少越强">炸板</th>' +
+    '<th title="当日换手率%">换手</th><th title="流通市值(亿)">市值</th>' +
+    '<th title="封单金额(亿)">封单</th><th>行业</th>' +
+    '<th title="短线动能分(封板时间/炸板/换手/市值/封单/连板/板块效应加权)">动能分</th>' +
+    '<th title="结构标签: 首板/N连板/早封/尾盘板/烂板/强封单/板块效应">标签</th>' +
+    '</tr></thead><tbody>' +
+    ztPoolRows.map((r, i) => `
+      <tr onclick="viewZtPick(${i})">
+        <td class="ai-rank">${i + 1}</td>
+        <td class="dstock"><span class="dn">${esc(r.name || r.code)}</span><span class="dc">${r.code}</span></td>
+        <td class="dv">${esc(_zttjTxt(r))}</td>
+        <td class="dv">${String(Math.floor(r.fbt / 100)).padStart(2, '0')}:${String(r.fbt % 100).padStart(2, '0')}</td>
+        <td class="dv">${r.zbc || 0}</td>
+        <td class="dv">${r.hs != null ? r.hs.toFixed(1) + '%' : '--'}</td>
+        <td class="dv">${r.ltsz != null ? r.ltsz.toFixed(0) : '--'}</td>
+        <td class="dv">${r.fund != null ? r.fund.toFixed(1) : '--'}</td>
+        <td class="dv" title="${esc(r.hybk || '--')}">${esc(r.hybk || '--')}</td>
+        <td class="dv dsc"><b class="${r.score >= 75 ? 'sc-hi' : r.score >= 60 ? 'sc-mid' : 'sc-lo'}">${r.score != null ? r.score.toFixed(0) : '--'}</b></td>
+        <td class="zt-tags">${esc(r.tags || '--')}</td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function renderMood(m) {
+  const box = document.getElementById('aiMood');
+  if (!m) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  box.innerHTML =
+    `<span class="mood-item ${MOOD_CLS[m.stage_cls] || ''}">` +
+    `<b>情绪温度 ${m.temp}</b>（${m.stage}期）</span>` +
+    `<span class="mood-item">涨停 <b class="up">${m.zt_n}</b></span>` +
+    `<span class="mood-item">跌停 <b class="down">${m.dt_n}</b></span>` +
+    `<span class="mood-item">炸板率 <b>${m.zb_rate}%</b></span>` +
+    `<span class="mood-item">最高 <b>${m.max_lbc}连板</b></span>` +
+    `<span class="mood-item">2板以上 <b>${m.lbc2_n}家</b></span>`;
+}
+
+function viewZtPick(i) {
+  const r = ztPoolRows[i];
+  if (!r) return;
+  closeAi();                       // 关面板露出K线
+  curEtf = r.code;
+  document.getElementById('chName').textContent = r.name || r.code;
+  document.getElementById('chCode').textContent = r.code;
+  document.getElementById('chIndex').textContent = '涨停池 #' + (i + 1);
   ['chPrice', 'chChg'].forEach(id => {
     const el = document.getElementById(id);
     el.textContent = '--';
