@@ -723,33 +723,68 @@ def _merge_klines(old, fresh, tf):
     return sorted(bar_map.values(), key=lambda b: b[0])[-KLINE_KEEP:]
 
 
-def get_kline_cached(code, tf="day", n=800):
-    """左栏主要指数/宽基ETF的K线: 读本地缓存, 缓存落后于最新交易日时只增量拉取
-    最近数据合并; 非交易日(周末/缓存已含最近交易日)直接用缓存, 不刷新"""
-    n = max(60, min(int(n or 800), KLINE_KEEP))
-    tf = tf if tf in ("day", "week") else "day"
-    now_ts = time.time()
-    now_c = now_cst()
+def _kline_read(code, tf):
+    """读缓存条目(进程内懒加载), 返回 (entry, bars)"""
     with KLINE_LOCK:
         if not _KC["loaded"]:
             _KC["data"] = load_json(KLINE_CACHE_PATH, {})
             _KC["loaded"] = True
         entry = _KC["data"].get(code, {}).get(tf) or {}
-        bars = list(entry.get("bars", []))
-        prev_last = bars[-1][0] if bars else None
-        # 缓存已是最新交易日且(非盘中或当日K线未到刷新点) → 不请求网络
-        if bars and (bars[-1][0] >= _latest_expected_date(now_c)
-                     or now_ts < entry.get("next_check", 0)) \
-                and not _forming_bar_stale(entry, bars, now_c, now_ts):
-            return bars[-n:]
+        return entry, list(entry.get("bars", []))
+
+
+def _kline_stale(entry, bars, now_c, now_ts):
+    """缓存是否需要网络刷新: 无数据/日期落后且过冷却期/盘中当日K线到刷新点;
+    冷却期优先(刚刷新过/停牌/节假日不反复请求, 也避免前端stale重拉死循环)"""
+    if not bars:
+        return True
+    if now_ts < entry.get("next_check", 0):
+        return False
+    if bars[-1][0] < _latest_expected_date(now_c):
+        return True
+    return _forming_bar_stale(entry, bars, now_c, now_ts)
+
+
+_KLINE_DIRTY = {"flag": False}     # 脏标记: 落盘线程批量写, 避免每次请求全量写文件
+_KLINE_REFRESHING = set()          # 刷新中的(code,tf), 防止重复发起
+
+
+def _kline_mark_dirty():
+    _KLINE_DIRTY["flag"] = True
+
+
+def _kline_flush_loop():
+    """K线缓存落盘线程: 有变更时每15秒批量写一次"""
+    while True:
+        time.sleep(15)
+        if not _KLINE_DIRTY["flag"] or not _KC["loaded"]:
+            continue
+        with KLINE_LOCK:
+            _KLINE_DIRTY["flag"] = False
+            try:
+                tmp = KLINE_CACHE_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(_KC["data"], f, ensure_ascii=False)
+                os.replace(tmp, KLINE_CACHE_PATH)
+            except Exception:
+                _KLINE_DIRTY["flag"] = True   # 写失败, 下轮重试
+
+
+def _refresh_kline(code, tf):
+    """网络刷新一个(code,tf)的缓存: 无缓存→全量; 超一周→全量(修正前复权); 其余60根增量"""
+    now_ts = time.time()
+    with KLINE_LOCK:
+        entry = _KC["data"].get(code, {}).get(tf) or {}
         full_ts = entry.get("full_ts", 0)
-    # 无缓存→全量拉取; 距上次全量超过一周→顺带全量(修正前复权); 其余只拉最近60根增量
-    full = (not bars) or (now_ts - full_ts > KLINE_FULL_SEC)
+        has_bars = bool(entry.get("bars"))
+    full = (not has_bars) or (now_ts - full_ts > KLINE_FULL_SEC)
     fresh = fetch_kline(code, tf, KLINE_KEEP if full else 60)
     with KLINE_LOCK:
         entry = _KC["data"].setdefault(code, {}).setdefault(tf, {})
+        old_bars = entry.get("bars") or []
+        prev_last = old_bars[-1][0] if old_bars else None
         if fresh:
-            entry["bars"] = _merge_klines(entry.get("bars", []), fresh, tf)
+            entry["bars"] = _merge_klines(old_bars, fresh, tf)
             if full:
                 entry["full_ts"] = now_ts
             new_last = entry["bars"][-1][0] if entry["bars"] else None
@@ -765,11 +800,71 @@ def get_kline_cached(code, tf="day", n=800):
                                                 else KLINE_RECHECK_SEC)
         else:   # 拉取失败, 10分钟后重试
             entry["next_check"] = now_ts + 600
-        tmp = KLINE_CACHE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_KC["data"], f, ensure_ascii=False)
-        os.replace(tmp, KLINE_CACHE_PATH)
-        return list(entry.get("bars", []))[-n:]
+    _kline_mark_dirty()
+    return list(entry.get("bars", []))
+
+
+def _refresh_kline_async(code, tf):
+    """后台线程刷新(去重: 同一code+tf刷新中不重复发起)"""
+    key = (code, tf)
+    with KLINE_LOCK:
+        if key in _KLINE_REFRESHING:
+            return
+        _KLINE_REFRESHING.add(key)
+
+    def _run():
+        try:
+            _refresh_kline(code, tf)
+        except Exception:
+            pass
+        finally:
+            with KLINE_LOCK:
+                _KLINE_REFRESHING.discard(key)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def serve_kline(code, tf="day", n=800):
+    """HTTP层K线(旧数据先出图): 缓存新鲜→直接返回; 过期但有旧数据→立即返回旧数据
+    并后台刷新(返回stale=True, 前端1.5s后重拉); 无缓存→同步拉一次(冷启动首次)
+    返回 (bars, stale)"""
+    n = max(60, min(int(n or 800), KLINE_KEEP))
+    tf = tf if tf in ("day", "week") else "day"
+    entry, bars = _kline_read(code, tf)
+    now_ts, now_c = time.time(), now_cst()
+    if not _kline_stale(entry, bars, now_c, now_ts):
+        return bars[-n:], False
+    if bars:
+        _refresh_kline_async(code, tf)
+        return bars[-n:], True
+    return _refresh_kline(code, tf)[-n:], False
+
+
+def get_kline_cached(code, tf="day", n=800):
+    """K线缓存(同步版, 供共振/背离扫描等后台逻辑): 过期即同步刷新"""
+    n = max(60, min(int(n or 800), KLINE_KEEP))
+    tf = tf if tf in ("day", "week") else "day"
+    entry, bars = _kline_read(code, tf)
+    now_ts, now_c = time.time(), now_cst()
+    if not _kline_stale(entry, bars, now_c, now_ts):
+        return bars[-n:]
+    return _refresh_kline(code, tf)[-n:]
+
+
+def _kline_prewarm():
+    """启动预热: 后台把自选+指数+宽基ETF的日K/周K刷进本地缓存, 用户首次点击秒开"""
+    time.sleep(3)   # 等服务先起来
+    codes = list(CACHED_KLINE_CODES) + list(_watch_codes())
+    for code in codes:
+        for tf in ("day", "week"):
+            try:
+                entry, bars = _kline_read(code, tf)
+                now_ts, now_c = time.time(), now_cst()
+                if _kline_stale(entry, bars, now_c, now_ts):
+                    _refresh_kline(code, tf)
+            except Exception:
+                pass
+            time.sleep(0.1)
+    _kline_mark_dirty()
 
 
 def _watch_codes():
@@ -1267,11 +1362,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "msg": "未授权访问", "auth": "unauthorized"}, 401)
         return False
 
-    def _json(self, obj, status=200):
+    def _json(self, obj, status=200, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1348,9 +1445,10 @@ class Handler(BaseHTTPRequestHandler):
             code = q.get("code", [""])[0]
             tf = q.get("tf", ["day"])[0]
             n = q.get("n", ["800"])[0]
-            # 左栏指数/宽基ETF及自选股走本地缓存(增量更新), 其余标的直接实时拉取
+            # 左栏指数/宽基ETF及自选股走本地缓存(旧数据先出图+后台刷新), 其余标的直接实时拉取
             if code in CACHED_KLINE_CODES or code in _watch_codes():
-                self._json(get_kline_cached(code, tf, n))
+                bars, stale = serve_kline(code, tf, n)
+                self._json(bars, headers={"X-Kline-Stale": "1" if stale else "0"})
             else:
                 self._json(fetch_kline(code, tf, n))
         elif u.path == "/api/stats":
@@ -1536,6 +1634,8 @@ def main():
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=_hub_quote_loop, daemon=True).start()   # SSE行情聚合推送
     threading.Thread(target=_hub_flow_loop, daemon=True).start()   # 主力净流入30s刷新(SSE随行情diff推送)
+    threading.Thread(target=_kline_flush_loop, daemon=True).start()  # K线缓存批量落盘(15s)
+    threading.Thread(target=_kline_prewarm, daemon=True).start()  # 启动预热自选/指数/ETF的K线缓存
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
     threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
     threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览

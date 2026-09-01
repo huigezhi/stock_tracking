@@ -23,9 +23,11 @@ const KChart = {
     this.code = code; this.tf = tf;
     if (tf !== 'min') this.data = [];
     this.win = null; this.draw();
+    let stale = false;
     try {
       const r = await apiFetch(`/api/kline?code=${code}&tf=${tf}&n=800`);
       this.data = await r.json();
+      stale = r.headers.get('X-Kline-Stale') === '1';
     } catch (e) { /* 保持空 */ }
     if (this.code !== code || this.tf !== tf) return;  // 已切换
     this.calcMa();
@@ -36,6 +38,12 @@ const KChart = {
     this.syncSlider();
     this.draw();
     ShareChart.draw();  // K线就绪后重绘(份额面板需引用收盘价)
+    // 旧数据先出图: 服务端后台刷新完成后静默重拉一次(期间用户已能看图操作)
+    if (stale) {
+      setTimeout(() => {
+        if (this.code === code && this.tf === tf) this.load(code, tf);
+      }, 1500);
+    }
   },
 
   /* 实时tick: 交易时段用最新行情更新最后一根日K(不重拉全量) */
