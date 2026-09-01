@@ -788,6 +788,203 @@ function setLogLvl(btn) {
   loadSysLogs();
 }
 
+/* ================= AI选股面板(每交易日18:00自动 + 手动) ================= */
+let aiTimer = null;
+let aiTicks = 0;
+let aiRunning = false;
+let aiPickRows = [];
+
+function openAi() {
+  document.getElementById('aiBox').style.display = 'flex';
+  loadAiConfig();
+  loadAiPicks();
+  clearInterval(aiTimer);
+  aiTicks = 0;
+  aiTimer = setInterval(() => {
+    aiTicks++;
+    if (aiRunning || aiTicks % 10 === 0) loadAiPicks();   // 运行中3秒/空闲30秒
+  }, 3000);
+}
+
+function closeAi() {
+  document.getElementById('aiBox').style.display = 'none';
+  clearInterval(aiTimer);
+  aiTimer = null;
+}
+
+async function loadAiConfig() {
+  try {
+    const r = await apiFetch('/api/ai/config');
+    const c = await r.json();
+    const key = document.getElementById('aiKey');
+    key.value = '';
+    key.placeholder = c.has_key ?
+        `已保存 ${c.key_mask}（留空 = 保持不变）` : 'DeepSeek API Key（尚未配置）';
+    const m = document.getElementById('aiModel');
+    m.value = c.model || '';
+    m.placeholder = c.default_model || 'deepseek-v4-flash';
+    document.getElementById('aiSub').textContent =
+        `每交易日 ${c.hour}:00 自动 · Top ${c.top_n}`;
+  } catch (e) { /* 网络错误已有全局处理 */ }
+}
+
+async function saveAiCfg() {
+  const btn = document.getElementById('aiSaveBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/ai/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        api_key: document.getElementById('aiKey').value.trim(),
+        model: document.getElementById('aiModel').value.trim()
+      })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast('AI配置已保存');
+      loadAiConfig();
+    } else toast(d.msg || '保存失败');
+  } catch (e) {
+    toast('保存失败, 请重试');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function clearAiKey() {
+  if (!confirm('确定清除已保存的 API Key 吗？')) return;
+  try {
+    await apiFetch('/api/ai/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({clear_key: true})
+    });
+    toast('API Key 已清除');
+    loadAiConfig();
+  } catch (e) {
+    toast('操作失败, 请重试');
+  }
+}
+
+async function testAi() {
+  const btn = document.getElementById('aiTestBtn');
+  const st = document.getElementById('aiStatus');
+  btn.disabled = true;
+  st.textContent = '连接测试中…';
+  st.className = 'ai-status run';
+  try {
+    const r = await apiFetch('/api/ai/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        api_key: document.getElementById('aiKey').value.trim(),
+        model: document.getElementById('aiModel').value.trim()
+      })
+    });
+    const d = await r.json();
+    st.textContent = d.msg || (d.ok ? '连接成功' : '连接失败');
+    st.className = 'ai-status ' + (d.ok ? 'ok' : 'err');
+  } catch (e) {
+    st.textContent = '测试失败(网络错误)';
+    st.className = 'ai-status err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runAiPick() {
+  const btn = document.getElementById('aiRunBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/ai/run');
+    const d = await r.json();
+    toast(d.msg || '已触发');
+    if (d.ok) {
+      aiRunning = true;
+      const st = document.getElementById('aiStatus');
+      st.textContent = '选股运行中, 请稍候…（DeepSeek 分析约需 10-60 秒）';
+      st.className = 'ai-status run';
+    }
+  } catch (e) {
+    toast('触发失败, 请重试');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadAiPicks() {
+  try {
+    const r = await apiFetch('/api/ai/picks');
+    renderAiPicks(await r.json());
+  } catch (e) { /* 面板打开期间网络抖动忽略, 下轮刷新 */ }
+}
+
+const AI_SRC_NAMES = {ai: 'DeepSeek 精选', model: '模型分 Top10（降级）',
+                      'ai+model': 'AI 精选 + 模型补齐'};
+
+function renderAiPicks(d) {
+  aiPickRows = d.rows || [];
+  aiRunning = !!d.running;
+  document.getElementById('aiRunBtn').disabled = aiRunning;
+  const st = document.getElementById('aiStatus');
+  if (aiRunning) {
+    st.textContent = '选股运行中… 结果稍后自动刷新';
+    st.className = 'ai-status run';
+  } else if (d.msg) {
+    st.textContent = d.msg;
+    st.className = 'ai-status ' + (/失败|无符合/.test(d.msg) ? 'err' : 'ok');
+  } else {
+    st.textContent = '尚未运行过选股';
+    st.className = 'ai-status';
+  }
+  const box = document.getElementById('aiPicks');
+  if (!d.date || !aiPickRows.length) {
+    box.innerHTML = `<div class="empty">暂无选股结果：点击「立即选股」手动运行，` +
+        `或等待每交易日 ${d.hour || 18}:00 自动运行</div>`;
+    return;
+  }
+  const src = aiPickRows[0].source || 'model';
+  const mlCell = v => v == null ? '<td class="dv">--</td>' :
+      `<td class="dv dsc"><b class="${v >= 60 ? 'sc-hi' : v >= 40 ? 'sc-mid' : 'sc-lo'}">${v.toFixed(0)}</b></td>`;
+  box.innerHTML =
+    `<div class="ai-date">${d.date} · 共 ${aiPickRows.length} 只 · ` +
+    `<span class="ai-src src-${esc(src)}">${AI_SRC_NAMES[src] || esc(src)}</span></div>` +
+    '<table class="ai-table"><thead><tr>' +
+    '<th>#</th><th>股票</th><th>现价</th>' +
+    '<th title="元标签模型质量分(0-100), 越高历史同类信号胜率越高">模型分</th>' +
+    '<th title="多指标共振强度(KDJ金叉/周线同向等加权)">共振分</th><th>入选理由</th>' +
+    '</tr></thead><tbody>' +
+    aiPickRows.map((r, i) => `
+      <tr onclick="viewAiPick(${i})">
+        <td class="ai-rank">${i + 1}</td>
+        <td class="dstock"><span class="dn">${esc(r.name || r.code)}</span><span class="dc">${r.code}</span></td>
+        <td class="dv">${r.price != null ? r.price.toFixed(2) : '--'}</td>
+        ${mlCell(r.ml_score)}
+        <td class="dv">${r.score != null ? r.score.toFixed(0) : '--'}</td>
+        <td class="ai-reason">${esc(r.reason || '--')}</td>
+      </tr>`).join('') +
+    '</tbody></table>';
+}
+
+function viewAiPick(i) {
+  const r = aiPickRows[i];
+  if (!r) return;
+  closeAi();                       // 关面板露出K线
+  curEtf = r.code;
+  document.getElementById('chName').textContent = r.name || r.code;
+  document.getElementById('chCode').textContent = r.code;
+  document.getElementById('chIndex').textContent = 'AI选股 Top' + (i + 1);
+  ['chPrice', 'chChg'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '--';
+    el.className = el.id;
+  });
+  document.getElementById('chAmount').textContent = '--';
+  document.getElementById('chShares').textContent = '--';
+  switchTf('day');
+}
+
 /* ================= PWA / 网络状态 ================= */
 /* Service Worker 注册: 静态外壳缓存 + 离线快照 */
 if ('serviceWorker' in navigator) {

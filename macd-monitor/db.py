@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "data.db")
@@ -40,6 +41,17 @@ CREATE TABLE IF NOT EXISTS signal_track(
   upd TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_track_upd ON signal_track(upd);
+
+-- AI选股结果: 每个选股日(pick_date)一组, rank 1-10; source: ai=deepseek精选 / model=模型分降级
+CREATE TABLE IF NOT EXISTS ai_pick(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pick_date TEXT NOT NULL, rank INTEGER,
+  code TEXT NOT NULL, name TEXT, tf TEXT DEFAULT 'day', price REAL,
+  ml_score REAL, score REAL, tags TEXT,
+  reason TEXT, source TEXT, created TEXT,
+  UNIQUE(pick_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_pick_date ON ai_pick(pick_date);
 """
 
 
@@ -205,6 +217,43 @@ def update_track(signal_id, fwd):
                 f"INSERT INTO signal_track(signal_id,{','.join(cols)},upd)"
                 " VALUES(?,?,?,?,?,?,date('now'))",
                 (signal_id, *vals))
+
+
+# ---------------- AI选股结果 ----------------
+
+def save_ai_picks(pick_date, rows):
+    """保存一组选股结果(同日覆盖); rows=[{code,name,price,ml_score,score,tags,reason,source},...]"""
+    now = time.strftime("%Y-%m-%d %H:%M")
+    with conn() as c:
+        c.execute("DELETE FROM ai_pick WHERE pick_date=?", (pick_date,))
+        for i, r in enumerate(rows, 1):
+            c.execute(
+                """INSERT OR REPLACE INTO ai_pick
+                   (pick_date, rank, code, name, tf, price, ml_score, score,
+                    tags, reason, source, created)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (pick_date, i, r["code"], r.get("name"), "day", r.get("price"),
+                 r.get("ml_score"), r.get("score"), r.get("tags") or "",
+                 r.get("reason") or "", r.get("source") or "model", now))
+
+
+def last_ai_pick_date():
+    """最近一次选股日期(无结果返回None)"""
+    with conn() as c:
+        return c.execute("SELECT MAX(pick_date) FROM ai_pick").fetchone()[0]
+
+
+def ai_picks_latest():
+    """最近一次选股结果: (pick_date, rows按rank排序)"""
+    with conn() as c:
+        d = c.execute("SELECT MAX(pick_date) FROM ai_pick").fetchone()[0]
+        if not d:
+            return None, []
+        rows = c.execute(
+            """SELECT rank, code, name, price, ml_score, score, tags,
+                      reason, source, created FROM ai_pick
+               WHERE pick_date=? ORDER BY rank""", (d,)).fetchall()
+        return d, [dict(r) for r in rows]
 
 
 def _agg(c, where, params):

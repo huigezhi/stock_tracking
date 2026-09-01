@@ -1291,6 +1291,240 @@ def _track_backfill():
             time.sleep(600)
 
 
+# ---------------- AI选股(元标签模型 + deepseek精选) ----------------
+# 每个交易日收盘后3小时(18:00): 从近期确认的日线底背离信号(剔除科创板/ST)中,
+# 按元标签模型分取前30候选 → deepseek精选10只胜率最高; 无key/AI失败降级为模型分Top10
+
+AI_PICK_HOUR = 18          # 收盘15:00 + 3小时
+AI_POOL_DAYS = 7            # 候选池: 近7个自然日内确认的信号(当日不足自动向近期扩展)
+AI_CAND_N = 30              # 送入AI的候选数量
+AI_TOP_N = 10               # 最终选股数量
+AI_STATE = {"running": False, "msg": "", "ts": 0}
+AI_RUN_NOW = threading.Event()
+
+DS_API = "https://api.deepseek.com/chat/completions"
+DS_DEFAULT_MODEL = "deepseek-v4-flash"   # 默认模型; 不存在时_ds_call自动回退deepseek-chat
+
+
+def _ai_cfg():
+    """读AI配置(config.json的ai节): {api_key, model}"""
+    with CFG_LOCK:
+        return dict(load_cfg().get("ai") or {})
+
+
+def _save_ai_cfg(api_key=None, model=None, clear_key=False):
+    """写AI配置; api_key为空表示保持不变, clear_key=True清除"""
+    with CFG_LOCK:
+        cfg = load_cfg()
+        ai = cfg.setdefault("ai", {})
+        if clear_key:
+            ai.pop("api_key", None)
+        elif api_key:
+            ai["api_key"] = api_key.strip()
+        if model is not None and model.strip():
+            ai["model"] = model.strip()
+        save_cfg(cfg)
+
+
+def _ai_candidates():
+    """候选池: 近AI_POOL_DAYS确认的日线底背离(不足AI_CAND_N只时自动放宽窗口,
+    7→14→30天), 剔除科创板(688/689)与ST; 同一标的取模型分最高的一条, 按模型分降序"""
+    with db.conn() as c:
+        rows = []
+        for days in (AI_POOL_DAYS, AI_POOL_DAYS * 2, 30):   # 逐级放宽时间窗
+            rows = c.execute(
+                """SELECT code, name, price, confirm, score, tags, ml_score,
+                          dif_inc, price1, price2, date2
+                   FROM div_signal
+                   WHERE tf='day' AND ml_score IS NOT NULL
+                     AND confirm >= date('now', ?)
+                   ORDER BY ml_score DESC""",
+                (f"-{days} day",)).fetchall()
+            if len(rows) >= AI_CAND_N:
+                break
+    best, seen = [], {}
+    for r in rows:
+        code, name = r["code"] or "", (r["name"] or "")
+        num = code[2:]
+        if num.startswith(("688", "689")):      # 科创板
+            continue
+        if "ST" in name.upper():                # ST/*ST/S*ST
+            continue
+        if code in seen:                        # 同标的保留模型分最高
+            continue
+        seen[code] = 1
+        best.append(dict(r))
+        if len(best) >= AI_CAND_N:
+            break
+    return best
+
+
+def _ds_headers(key):
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def _ds_call(key, model, messages, timeout=90, max_tokens=2000):
+    """调用deepseek chat completions, 返回文本; 模型不存在时自动回退deepseek-chat"""
+    body = {"model": model, "messages": messages,
+            "temperature": 0.2, "max_tokens": max_tokens}
+    r = requests.post(DS_API, headers=_ds_headers(key), json=body, timeout=timeout)
+    if r.status_code != 200 and "not exist" in r.text.lower():
+        body["model"] = "deepseek-chat"
+        r = requests.post(DS_API, headers=_ds_headers(key), json=body, timeout=timeout)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+
+def _ai_pick_prompt(cands):
+    """构造候选清单与选股指令"""
+    lines = []
+    for i, c in enumerate(cands, 1):
+        ml = f"{c['ml_score']:.0f}" if c.get("ml_score") is not None else "--"
+        sc = c.get("score")
+        sc = f"{sc:.0f}" if sc is not None else "--"
+        drop = ((c["price2"] / c["price1"] - 1) * 100
+                if c.get("price1") and c.get("price2") else 0)
+        lines.append(
+            f"{i}. {c['code']} {c['name']} 现价{c['price'] or '--'} "
+            f"模型分{ml} 共振分{sc} 背离低点{c['date2']} 前低跌幅{drop:.1f}% "
+            f"确认日{c['confirm']} DIF增量{c.get('dif_inc') or 0:.3f}")
+    return f"""你是专业的A股量化分析师。以下是全市场MACD日线底背离信号(已剔除科创板与ST股票)。
+其中「模型分」是元标签机器学习模型(三重障碍标注+walk-forward验证, 样本外AUC 0.66)对信号历史胜率的估计(0-100, 越高越好), 「共振分」是多指标共振强度(KDJ金叉/周线同向/放量反包等加权)。
+
+候选信号列表:
+{chr(10).join(lines)}
+
+请综合模型分、共振分、背离结构(前低跌幅/DIF增量)与你的A股市场经验, 从中选出{AI_TOP_N}只未来5-10个交易日胜率(上涨概率)最高的标的。
+选择原则: 模型分与共振分是核心依据, 避免集中在单一行业, 剔除你判断有明显利空风险(如连续一字跌停打开、退市风险)的标的。
+严格只输出一个JSON数组, 不要输出任何其他文字, 格式:
+[{{"code": "sh600000", "reason": "一句话核心理由, 30字以内"}}, ...]
+必须恰好{AI_TOP_N}项, code必须完全来自上面候选列表。"""
+
+
+def _parse_ai_picks(text, cands):
+    """解析AI返回的JSON数组, 映射回候选明细; 无效code丢弃"""
+    i, j = text.find("["), text.rfind("]")
+    if i < 0 or j <= i:
+        return []
+    try:
+        arr = json.loads(text[i:j + 1])
+    except Exception:
+        return []
+    by_code = {c["code"]: c for c in cands}
+    out, seen = [], set()
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        code = str(it.get("code", "")).strip()
+        c = by_code.get(code)
+        if not c or code in seen:
+            continue
+        seen.add(code)
+        pick = dict(c)
+        pick["reason"] = str(it.get("reason", ""))[:80]
+        out.append(pick)
+        if len(out) >= AI_TOP_N:
+            break
+    return out
+
+
+def run_ai_pick():
+    """执行一次AI选股(定时/手动共用): 模型分候选 → deepseek精选; 降级为模型分Top10。
+    返回 (ok, msg)"""
+    if AI_STATE["running"]:
+        return False, "选股进行中, 请稍候"
+    AI_STATE["running"] = True
+    try:
+        today = now_cst().strftime("%Y-%m-%d")
+        cands = _ai_candidates()
+        if not cands:
+            AI_STATE.update(msg="近期无符合条件的底背离信号", ts=time.time())
+            return False, "近期无符合条件的底背离信号(已剔除科创板/ST)"
+        ai = _ai_cfg()
+        key = ai.get("api_key", "")
+        model = ai.get("model") or DS_DEFAULT_MODEL
+        picks, source, msg = None, "model", ""
+        if key:
+            try:
+                text = _ds_call(key, model,
+                                [{"role": "user",
+                                  "content": _ai_pick_prompt(cands)}])
+                picks = _parse_ai_picks(text, cands)
+                if len(picks) < AI_TOP_N:
+                    obs.record("WARN", "ai",
+                               f"deepseek返回{len(picks)}只有效标的(<{AI_TOP_N}), 降级补齐")
+                    source = "ai+model"
+                else:
+                    source = "ai"
+            except Exception as e:
+                obs.record("WARN", "ai", f"deepseek调用失败: {e!r}")
+                msg = f"AI调用失败({e!r}), 已降级为模型分Top10; "
+        else:
+            msg = "未配置API Key, 使用模型分Top10; "
+        # AI结果不足10只时用候选池(模型分序)补齐
+        picks = picks or []
+        if len(picks) < AI_TOP_N:
+            chosen = {p["code"] for p in picks}
+            for c in cands:
+                if len(picks) >= AI_TOP_N:
+                    break
+                if c["code"] not in chosen:
+                    p = dict(c)
+                    p.setdefault("reason", "模型分Top候选")
+                    picks.append(p)
+                    chosen.add(c["code"])
+        for p in picks:
+            p["source"] = source
+        db.save_ai_picks(today, picks)
+        AI_STATE.update(msg=f"{today} 选股完成: {len(picks)}只 ({source})",
+                        ts=time.time())
+        obs.record("INFO", "ai", f"AI选股完成: {today} {len(picks)}只, 来源={source}")
+        return True, f"{today} 选股完成: {len(picks)}只 ({source})"
+    except Exception as e:
+        obs.record("ERROR", "ai", f"AI选股失败: {e!r}")
+        AI_STATE.update(msg=f"选股失败: {e!r}", ts=time.time())
+        return False, f"选股失败: {e!r}"
+    finally:
+        AI_STATE["running"] = False
+
+
+def _ai_pick_loop():
+    """后台线程: 每个交易日18:00(收盘+3小时)自动选股; 当日已选过不重复;
+    前端"立即选股"可随时手动触发(非交易日也可)"""
+    while True:
+        try:
+            now = now_cst()
+            target = now.replace(hour=AI_PICK_HOUR, minute=0, second=0,
+                                 microsecond=0)
+            if now < target:
+                # 未到18:00: 休眠至定点, 可被手动触发提前唤醒
+                if AI_RUN_NOW.wait(max(60.0, (target - now).total_seconds())):
+                    AI_RUN_NOW.clear()
+                    run_ai_pick()
+                continue
+            # 已过18:00: 手动触发立即执行; 否则交易日定时(当日未选过)执行
+            if AI_RUN_NOW.wait(60):
+                AI_RUN_NOW.clear()
+                run_ai_pick()
+                continue
+            today = now.strftime("%Y-%m-%d")
+            if now.weekday() < 5 and _is_trading_day(today) \
+                    and db.last_ai_pick_date() != today:
+                run_ai_pick()
+                continue
+            # 今日已完成或非交易日: 休眠到明天18:00(手动可唤醒)
+            nxt = now_cst().replace(hour=AI_PICK_HOUR, minute=0, second=0,
+                                    microsecond=0)
+            if now_cst() >= nxt:
+                nxt += timedelta(days=1)
+            if AI_RUN_NOW.wait(max(60.0, (nxt - now_cst()).total_seconds())):
+                AI_RUN_NOW.clear()
+                run_ai_pick()
+        except Exception as e:
+            obs.record("ERROR", "ai", f"AI选股线程异常: {e!r}")
+            time.sleep(300)
+
+
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
         ".ico": "image/x-icon", ".webmanifest": "application/manifest+json; charset=utf-8"}
@@ -1463,6 +1697,31 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/tags":
             # 共振标签定义(前端展示徽章用)
             self._json({"labels": TAG_LABELS, "weights": TAG_WEIGHTS})
+        elif u.path == "/api/ai/config":
+            # AI选股配置(密钥脱敏返回)
+            ai = _ai_cfg()
+            key = ai.get("api_key", "")
+            self._json({
+                "has_key": bool(key),
+                "key_mask": (key[:5] + "***" + key[-4:]) if len(key) > 12 else ("***" if key else ""),
+                "model": ai.get("model") or DS_DEFAULT_MODEL,
+                "hour": AI_PICK_HOUR, "top_n": AI_TOP_N,
+                "default_model": DS_DEFAULT_MODEL,
+            })
+        elif u.path == "/api/ai/picks":
+            # 最近一次选股结果 + 运行状态
+            d, rows = db.ai_picks_latest()
+            self._json({"running": AI_STATE["running"], "date": d,
+                        "rows": rows, "msg": AI_STATE["msg"],
+                        "ts": AI_STATE["ts"], "top_n": AI_TOP_N,
+                        "hour": AI_PICK_HOUR})
+        elif u.path == "/api/ai/run":
+            # 手动选股: 由选股线程异步执行(可能含deepseek调用, 秒级到分钟级)
+            if AI_STATE["running"]:
+                self._json({"ok": False, "msg": "选股进行中, 请稍候"})
+            else:
+                AI_RUN_NOW.set()
+                self._json({"ok": True, "msg": "已触发AI选股, 结果稍后自动刷新"})
         elif u.path == "/api/intraday":
             # 盘中60分钟底背离预览信号(自选股, 前端初始加载; 之后走SSE)
             with INTRADAY_LOCK:
@@ -1548,6 +1807,47 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path in ("/api/ai/config", "/api/ai/test"):
+            # AI选股配置保存 / deepseek连接测试
+            if not self._auth_guard():
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length))
+            except Exception:
+                self._json({"ok": False, "msg": "请求格式错误"}, 400)
+                return
+            if u.path == "/api/ai/config":
+                _save_ai_cfg(api_key=data.get("api_key"),
+                             model=data.get("model"),
+                             clear_key=bool(data.get("clear_key")))
+                ai = _ai_cfg()
+                self._json({"ok": True, "model": ai.get("model") or DS_DEFAULT_MODEL,
+                            "has_key": bool(ai.get("api_key"))})
+                return
+            # /api/ai/test: 用当前保存的key发一条最小消息验证连通
+            ai = _ai_cfg()
+            key = ai.get("api_key", "")
+            model = data.get("model") or ai.get("model") or DS_DEFAULT_MODEL
+            if not key:
+                key = (data.get("api_key") or "").strip()
+            if not key:
+                self._json({"ok": False, "msg": "未填写API Key"})
+                return
+            try:
+                text = _ds_call(key, model,
+                                [{"role": "user", "content": "回复OK"}],
+                                timeout=20, max_tokens=8)
+                self._json({"ok": True, "msg": f"连接成功, 模型回复: {text[:20]}"})
+            except Exception as e:
+                detail = ""
+                try:
+                    detail = e.response.text[:120] if getattr(e, "response", None) else ""
+                except Exception:
+                    pass
+                self._json({"ok": False,
+                            "msg": f"连接失败: {e}{'; ' + detail if detail else ''}"})
+            return
         if u.path == "/api/div/rescan":
             # 前端"立即更新"按钮: 唤醒扫描线程手动全量重扫(不影响16:00定时扫描)
             if not self._auth_guard():
@@ -1638,6 +1938,7 @@ def main():
     threading.Thread(target=_kline_prewarm, daemon=True).start()  # 启动预热自选/指数/ETF的K线缓存
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
     threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
+    threading.Thread(target=_ai_pick_loop, daemon=True).start()  # 每日18:00 AI选股(收盘+3小时)
     threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览
     print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()

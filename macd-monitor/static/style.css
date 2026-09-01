@@ -378,3 +378,61 @@ body.dark .tag.zs { background: #3d331a; }
 .sl-row.lvl-info .sl-l { color: var(--muted); background: var(--line); }
 .sl-m { color: var(--accent); flex: none; }
 .sl-x { word-break: break-all; }
+/* AI选股弹窗(每日Top10: 配置 + 状态 + 结果表) */
+.ai-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 100;
+           display: flex; align-items: center; justify-content: center; }
+.ai-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+           width: min(860px, 94vw); max-height: 88vh; display: flex; flex-direction: column;
+           box-shadow: 0 8px 32px rgba(0,0,0,.25); }
+.ai-head { display: flex; justify-content: space-between; align-items: center;
+           gap: 10px; padding: 14px 20px 0; }
+.ai-sub { font-size: 12px; color: var(--muted); font-weight: 400; }
+.ai-body { padding: 12px 20px 16px; overflow-y: auto; display: flex;
+           flex-direction: column; gap: 10px; min-height: 0; }
+.ai-cfg { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ai-in { background: var(--bg, transparent); color: var(--fg); border: 1px solid var(--line);
+         border-radius: 6px; padding: 5px 10px; font-size: 12px; }
+.ai-in.key { flex: 1 1 260px; min-width: 200px; }
+.ai-in.model { flex: 0 1 180px; min-width: 140px; }
+.ai-in:focus { outline: none; border-color: var(--accent); }
+.ai-cfg .stats-btn:disabled { opacity: .5; cursor: not-allowed; }
+.ai-clear { color: var(--muted); }
+.ai-status { font-size: 12px; padding: 7px 10px; border-radius: 6px;
+             border: 1px solid var(--line); background: var(--panel, rgba(127,127,127,.06));
+             color: var(--muted); }
+.ai-status.ok { color: var(--down); border-color: rgba(10,138,74,.35);
+                background: rgba(10,138,74,.08); }
+.ai-status.err { color: var(--up); border-color: rgba(208,58,47,.35);
+                 background: rgba(208,58,47,.08); }
+.ai-status.run { color: #f5a623; border-color: rgba(245,166,35,.4);
+                 background: rgba(245,166,35,.08); }
+.ai-tip { font-size: 11px; color: var(--muted); line-height: 1.7; }
+.ai-picks { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.ai-date { padding: 8px 12px 6px; font-size: 12px; color: var(--muted);
+           display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ai-src { font-size: 11px; padding: 0 6px; border-radius: 3px; line-height: 17px;
+          border: 1px solid transparent; }
+.ai-src.src-ai { color: var(--down); background: rgba(10,138,74,.10);
+                 border-color: rgba(10,138,74,.35); }
+.ai-src.src-model { color: #f5a623; background: rgba(245,166,35,.10);
+                    border-color: rgba(245,166,35,.35); }
+.ai-src.src-ai\+model { color: #4a7fd4; background: rgba(74,127,212,.10);
+                        border-color: rgba(74,127,212,.35); }
+.ai-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ai-table th, .ai-table td { padding: 6px 8px; border-bottom: 1px solid var(--line);
+                             text-align: right; white-space: nowrap; }
+.ai-table th { color: var(--muted); font-weight: 500; position: sticky; top: 0;
+               background: var(--card); }
+.ai-table th:nth-child(2), .ai-table td:nth-child(2) { text-align: left; }
+.ai-table td:last-child, .ai-table th:last-child { text-align: left;
+                                                   white-space: normal; min-width: 220px; }
+.ai-table tbody tr { cursor: pointer; }
+.ai-table tbody tr:hover { background: var(--panel, rgba(127,127,127,.08)); }
+.ai-table tbody tr:last-child td { border-bottom: none; }
+.ai-rank { color: var(--muted); font-weight: 600; }
+.ai-table tbody tr:nth-child(-n+3) .ai-rank { color: #f5a623; }
+.ai-reason { color: var(--fg); font-size: 12px; line-height: 1.5; }
+@media (max-width: 720px) {
+  .ai-in.key { flex: 1 1 100%; }
+  .ai-table td:last-child, .ai-table th:last-child { min-width: 160px; }
+}
