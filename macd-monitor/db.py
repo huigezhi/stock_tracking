@@ -236,11 +236,12 @@ def stats():
         span = c.execute("SELECT MIN(confirm), MAX(confirm) FROM div_signal").fetchone()
         out = {"total": total, "from": span[0], "to": span[1],
                "overall": _agg(c, "1=1", ())}
-        # 分层: 周期
+        # 分层: 周期(只列有样本的周期; 周线已停扫, 存量数据仍可展示)
         out["by_tf"] = []
         for tf, name in (("day", "日线"), ("week", "周线")):
             a = _agg(c, "s.tf=?", (tf,))
-            out["by_tf"].append({"key": tf, "name": name, **a})
+            if (a.get("n5") or 0) > 0:
+                out["by_tf"].append({"key": tf, "name": name, **a})
         # 分层: 共振分 0-2 / 3-4 / 5-9
         out["by_score"] = []
         for lo, hi in ((0, 2), (3, 4), (5, 9)):

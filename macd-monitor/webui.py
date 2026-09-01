@@ -146,14 +146,15 @@ def fetch_quotes(codes):
     return fetch_quotes_any(codes)
 
 
-_FLOW_CACHE = {}  # code -> (timestamp, 主力净流入元|None)
+_FLOW_CACHE = {}   # code -> (timestamp, 主力净流入元|None)
+FLOW_TTL = 30     # 缓存秒数; 后台线程对SSE订阅代码持续刷新, 前端近实时
 
 
 def fetch_flow(code):
-    """新浪资金流向: 当日主力净流入(元), 缓存60秒; 指数/无数据返回None"""
+    """新浪资金流向: 当日主力净流入(元), 缓存FLOW_TTL秒; 指数/无数据返回None"""
     now = time.time()
     c = _FLOW_CACHE.get(code)
-    if c and now - c[0] < 60:
+    if c and now - c[0] < FLOW_TTL:
         return c[1]
     val = None
     try:
@@ -257,7 +258,7 @@ def _hub_push(event):
 
 
 def _hub_quote_loop():
-    """行情线程: 每3秒拉一次订阅代码的行情并广播diff"""
+    """行情线程: 每3秒拉一次订阅代码的行情并广播diff(含主力净流入, 变化即推)"""
     while True:
         try:
             with _hub_subs_lock:
@@ -266,6 +267,9 @@ def _hub_quote_loop():
                 quotes = fetch_quotes(codes)
                 changed = {}
                 for code, q in quotes.items():
+                    if q and not is_index_code(code):
+                        q = dict(q)
+                        q["flow"] = _flow_cached(code)
                     if q != _hub_last_quotes.get(code):
                         changed[code] = q
                         _hub_last_quotes[code] = q
@@ -274,6 +278,30 @@ def _hub_quote_loop():
             time.sleep(HUB_QUOTE_SEC)
         except Exception:
             time.sleep(5)
+
+
+def _flow_cached(code):
+    """读资金流缓存(不打网络); 无缓存返回None"""
+    c = _FLOW_CACHE.get(code)
+    return c[1] if c else None
+
+
+def _hub_flow_loop():
+    """资金流线程: 每10秒扫描订阅代码, 过期(>25s)的串行刷新, 避免阻塞行情线程"""
+    while True:
+        try:
+            now = time.time()
+            with _hub_subs_lock:
+                codes = [c for c in _hub_codes if not is_index_code(c)]
+            for code in codes:
+                c = _FLOW_CACHE.get(code)
+                if c and now - c[0] < FLOW_TTL - 5:
+                    continue
+                fetch_flow(code)
+                time.sleep(0.15)
+        except Exception:
+            pass
+        time.sleep(10)
 
 
 def hub_scan_progress():
@@ -944,10 +972,10 @@ def _resonance(klines, closes, p1, p2, cidx, tf):
 
 
 def _scan_one_divs(stock, now):
-    """扫描单只股票的日线/周线底背离, 只保留最近 DIV_RECENT 周期内成立的信号"""
+    """扫描单只股票的日线底背离, 只保留最近 DIV_RECENT 周期内成立的信号"""
     code = stock["code"]
     rows = []
-    for tf, tf_name in (("day", "日线"), ("week", "周线")):
+    for tf, tf_name in (("day", "日线"),):
         try:
             klines = fetch_kline(code, tf, DIV_KLINE_N)
         except Exception:
@@ -1485,6 +1513,7 @@ def main():
     port = int(os.environ.get("WEBUI_PORT", str(PORT)))
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=_hub_quote_loop, daemon=True).start()   # SSE行情聚合推送
+    threading.Thread(target=_hub_flow_loop, daemon=True).start()   # 主力净流入30s刷新(SSE随行情diff推送)
     threading.Thread(target=_div_scanner, daemon=True).start()  # 每日底背离全量扫描
     threading.Thread(target=_track_backfill, daemon=True).start()  # 每日信号跟踪回填
     threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览
