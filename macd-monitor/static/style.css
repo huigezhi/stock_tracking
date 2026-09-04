@@ -457,6 +457,8 @@ body.dark .tag.zs { background: #3d331a; }
 .zt-table td:last-child, .zt-table th:last-child { min-width: 0; white-space: nowrap; }
 .zt-tags { color: var(--muted); font-size: 11px; }
 .ai-picks .ai-table { max-height: 46vh; }
+.ccr-avg { font-style: normal; color: var(--muted); font-size: 10px;
+           margin-left: 1px; }
 
 @media (max-width: 720px) {
   .ai-in.key { flex: 1 1 100%; }

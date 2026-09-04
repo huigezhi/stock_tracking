@@ -949,6 +949,21 @@ function _zttjTxt(e) {
   return lbc >= 2 ? `${lbc}连板` : '首板';
 }
 
+/* 现金转化率(每股经营现金流/每股收益): >=1利润含金量高(绿), <0.3应收堆积警惕(红);
+   亏损股看经营现金流正负(为负=失血,红), 其余灰 */
+function _ccrCell(e) {
+  if (e.ccr != null) {
+    const cls = e.ccr >= 1 ? 'down' : (e.ccr < 0.3 ? 'up' : '');
+    return `<b class="${cls}">${e.ccr.toFixed(2)}</b>` +
+        (e.ccr_avg != null ? `<i class="ccr-avg">/${e.ccr_avg.toFixed(2)}</i>` : '');
+  }
+  if ((e.eps || 0) < 0) {
+    const bleed = e.ocf_ps != null && e.ocf_ps < 0;
+    return bleed ? '<b class="up">亏损·失血</b>' : '亏损';
+  }
+  return '--';
+}
+
 function renderAiPicks(d) {
   aiPickRows = d.rows || [];
   aiRunning = !!d.running;
@@ -988,7 +1003,9 @@ function renderAiPicks(d) {
     '<th>#</th><th>股票</th><th>结构</th><th title="当日封板时间, 越早越强">封板</th>' +
     '<th title="当日换手率%">换手</th><th title="流通市值(亿)">市值</th>' +
     '<th title="当日同行业涨停家数">行业</th>' +
-    '<th title="短线动能分(封板时间/炸板/换手/市值/封单/连板/板块效应加权)">动能分</th><th>入选理由</th>' +
+    '<th title="短线动能分(封板时间/炸板/换手/市值/封单/连板/板块效应加权)">动能分</th>' +
+    '<th title="现金转化率/近4期均值: >=1利润含金量高(绿), <0.3警惕应收堆积(红); 亏损股看经营现金流正负">现金流</th>' +
+    '<th>入选理由</th>' +
     '</tr></thead><tbody>' +
     aiPickRows.map((r, i) => {
       const e = r.extra || {};
@@ -1002,6 +1019,7 @@ function renderAiPicks(d) {
         <td class="dv">${e.ltsz != null ? e.ltsz.toFixed(0) : '--'}</td>
         <td class="dv" title="${esc(e.hybk || '--')}">${esc(e.hybk || '--')}</td>
         <td class="dv dsc"><b class="${r.score >= 75 ? 'sc-hi' : r.score >= 60 ? 'sc-mid' : 'sc-lo'}">${r.score != null ? r.score.toFixed(0) : '--'}</b></td>
+        <td class="dv dsc">${_ccrCell(e)}</td>
         <td class="ai-reason">${esc(r.reason || '--')}</td>
       </tr>`;
     }).join('') +

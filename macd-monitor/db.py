@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS ai_pick_track(
   fwd1 REAL, fwd3 REAL, fwd5 REAL, upd TEXT,
   PRIMARY KEY(pick_date, code)
 );
+
+-- 财务质量缓存: 现金转化率ccr=每股经营现金流/每股收益(近4期, 东财业绩报表)
+-- 利润<=0时ccr=NULL(亏损); 7天过期重拉(财报按季度更新)
+CREATE TABLE IF NOT EXISTS fin_quality(
+  code TEXT PRIMARY KEY,
+  eps REAL, ocf_ps REAL, ccr REAL, ccr_avg REAL,
+  report_date TEXT, updated TEXT
+);
 """
 
 
@@ -409,6 +417,30 @@ def prune_zt(keep_days=90):
                   (f"-{keep_days} day",))
         c.execute("DELETE FROM zt_mood WHERE date < date('now', ?)",
                   (f"-{keep_days} day",))
+
+
+# ---------------- 财务质量(现金转化率)缓存 ----------------
+
+def fin_all():
+    """全量财务质量缓存: {code: row}"""
+    with conn() as c:
+        return {r["code"]: dict(r)
+                for r in c.execute("SELECT * FROM fin_quality")}
+
+
+def save_fin(f):
+    """写入/覆盖一只股票的现金转化率快照"""
+    with conn() as c:
+        c.execute(
+            """INSERT INTO fin_quality(code, eps, ocf_ps, ccr, ccr_avg,
+                                       report_date, updated)
+               VALUES(?,?,?,?,?,?,date('now'))
+               ON CONFLICT(code) DO UPDATE SET
+                 eps=excluded.eps, ocf_ps=excluded.ocf_ps, ccr=excluded.ccr,
+                 ccr_avg=excluded.ccr_avg, report_date=excluded.report_date,
+                 updated=excluded.updated""",
+            (f["code"], f.get("eps"), f.get("ocf_ps"), f.get("ccr"),
+             f.get("ccr_avg"), f.get("report_date")))
 
 
 def _agg(c, where, params):

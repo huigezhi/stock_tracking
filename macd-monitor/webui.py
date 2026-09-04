@@ -1425,6 +1425,49 @@ def _ai_candidates(cands_rows):
     return out
 
 
+FIN_CACHE_DAYS = 7      # 财务质量缓存天数(财报按季度更新, 7天重拉足够)
+
+
+def _fin_fill(cands):
+    """为候选注入现金转化率(每股经营现金流/每股收益, 东财业绩报表):
+    盈利期为利润含金量, 亏损期看OCF正负; 库缓存7天, 缺/过期现场拉(轻限速)"""
+    if not cands:
+        return cands
+    cutoff = (now_cst() - timedelta(days=FIN_CACHE_DAYS)).strftime("%Y-%m-%d")
+    cache = db.fin_all()
+    for c in cands:
+        f = cache.get(c["code"])
+        if not f or (f.get("updated") or "") < cutoff:
+            fq = zt.fetch_fin(c["code"])
+            if fq:
+                db.save_fin(fq)
+                f = fq
+            time.sleep(0.1)                 # 轻微限速
+        if f:
+            e = c.setdefault("extra", {})
+            e["ccr"] = f.get("ccr")
+            e["ccr_avg"] = f.get("ccr_avg")
+            e["eps"] = f.get("eps")
+            e["ocf_ps"] = f.get("ocf_ps")
+    return cands
+
+
+def _ccr_txt(e):
+    """现金转化率文本: 盈利期给数值+近4期均值, 亏损期看经营现金流正负, 缺数据给--"""
+    ccr = e.get("ccr")
+    if ccr is not None:
+        s = f"{ccr:.2f}"
+        if e.get("ccr_avg") is not None:
+            s += f"(均{e['ccr_avg']:.2f})"
+        return s
+    if (e.get("eps") or 0) < 0:
+        ocf = e.get("ocf_ps")
+        if ocf is None:
+            return "亏损"
+        return f"亏损(经营现金流{'为正' if ocf >= 0 else '为负,失血'})"
+    return "--"
+
+
 def _ds_headers(key):
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
@@ -1442,18 +1485,20 @@ def _ds_call(key, model, messages, timeout=90, max_tokens=2000):
 
 
 def _ai_pick_prompt(cands, mood, pool_date):
-    """构造游资视角的短线选股指令: 情绪周期定位 + 涨停结构分析"""
+    """构造游资视角的短线选股指令: 情绪周期定位 + 涨停结构分析 + 财务排雷"""
     lines = []
     for i, c in enumerate(cands, 1):
         e = c.get("extra") or {}
         lbc = e.get("lbc") or 1
         zttj = f"{e.get('days')}天{e.get('ct')}板" if e.get("days") and e.get("ct") and e["ct"] < e["days"] else f"{lbc}连板"
+        fin_s = _ccr_txt(e)
         lines.append(
             f"{i}. {c['code']} {c['name']} [{zttj}] 现价{c['price']} 涨幅+{e.get('pct', 0):.1f}% "
             f"换手{e.get('hs', 0):.1f}% 流通市值{e.get('ltsz', 0):.0f}亿 "
             f"封板{e.get('fbt_s', '--')} 炸板{e.get('zbc', 0)}次 "
             f"封单{e.get('fund', 0):.1f}亿({e.get('seal', 0):.1f}%流通) "
-            f"行业:{e.get('hybk') or '--'} 动能分{c.get('score', 0):.0f}")
+            f"行业:{e.get('hybk') or '--'} 动能分{c.get('score', 0):.0f} "
+            f"现金转化率:{fin_s}")
     mood_txt = "未知"
     if mood:
         mood_txt = (f"涨停{mood['zt_n']}家, 跌停{mood['dt_n']}家, 炸板率{mood['zb_rate']}%, "
@@ -1474,7 +1519,8 @@ def _ai_pick_prompt(cands, mood, pool_date):
 3. 首板看质量: 封板早(10:30前)/封单大/换手5-15%/炸板少; 尾盘板(14:30后)与烂板(炸板2次+)坚决剔除
 4. 连板看人气: 2板确认动量, 3板以上吃溢价但注意高度风险, 创业板20cm的3板以上透支严重
 5. 规避: 高位放量滞涨的独苗票, 无板块效应的孤立板, 尾盘偷袭板
-6. 行业分散, 同一板块最多3只
+6. 财务排雷(辅助, 不作主选依据): 现金转化率=每股经营现金流/每股收益, >=1利润含金量高(同等动能优先), <0.3利润多为应收账款(粉饰/暴雷风险, 规避); 亏损且经营现金流为负的(失血)坚决剔除, 亏损但现金流为正的可正常参与
+7. 行业分散, 同一板块最多3只
 严格只输出一个JSON数组, 不要输出任何其他文字, 格式:
 [{{"code": "sh600000", "reason": "一句话核心理由, 30字以内"}}, ...]
 必须恰好{AI_TOP_N}项, code必须完全来自上面候选列表。"""
@@ -1519,6 +1565,7 @@ def run_ai_pick():
             AI_STATE.update(msg="无可用涨停池数据(非交易日或接口异常)", ts=time.time())
             return False, "无可用涨停池数据(非交易日或接口异常)"
         cands = _ai_candidates(pool_rows)
+        _fin_fill(cands)          # 注入现金转化率(利润含金量/排雷参考, 库缓存7天)
         ai = _ai_cfg()
         key = ai.get("api_key", "")
         model = ai.get("model") or DS_DEFAULT_MODEL

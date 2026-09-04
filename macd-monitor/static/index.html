@@ -206,7 +206,7 @@
         <button class="ai-tab" id="tabPool" onclick="switchAiTab('pool')">涨停股池</button>
         <span class="ai-stats" id="aiStats"></span>
       </div>
-      <div class="ai-tip">短线策略：每个交易日 15:20 抓取当日涨停股池（剔除 ST/科创板/北交所）并计算动能分与市场情绪温度；18:00 按动能分 Top30 候选 → DeepSeek 以游资视角精选次日胜率最高的 10 只。未配置 Key 时降级为动能分 Top10。点击行查看K线。</div>
+      <div class="ai-tip">短线策略：每个交易日 15:20 抓取当日涨停股池（剔除 ST/科创板/北交所）并计算动能分与市场情绪温度；18:00 按动能分 Top30 候选 → DeepSeek 以游资视角精选次日胜率最高的 10 只。候选附现金转化率（经营现金流/利润）用于财务排雷：≥1 利润含金量高，&lt;0.3 警惕应收堆积，亏损且现金流为负（失血）的剔除。未配置 Key 时降级为动能分 Top10。点击行查看K线。</div>
       <div class="ai-picks" id="aiPicks">加载中…</div>
       <div class="ai-picks" id="ztPool" style="display:none">加载中…</div>
     </div>

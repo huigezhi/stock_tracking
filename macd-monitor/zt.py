@@ -17,6 +17,7 @@ import obs
 ZT_API = "https://push2ex.eastmoney.com/getTopicZTPool"
 ZB_API = "https://push2ex.eastmoney.com/getTopicZBPool"
 DT_API = "https://push2ex.eastmoney.com/getTopicDTPool"
+FIN_API = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
 
 S = requests.Session()
 S.headers.update({"User-Agent": "Mozilla/5.0",
@@ -82,6 +83,44 @@ def _tradable(r):
     if "ST" in r["name"].upper():           # ST/*ST/S*ST
         return False
     return True
+
+
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_fin(code):
+    """东财业绩报表: 最近4个报告期的每股收益/每股经营现金流 → 现金转化率
+    ccr = 每股经营现金流/每股收益(股本同口径, 等价于 经营现金流净额/归母净利润);
+    利润<=0时ccr=None(亏损, 亏损股看OCF正负判断造血能力); 返回dict或None"""
+    try:
+        r = S.get(FIN_API, params={
+            "reportName": "RPT_LICO_FN_CPD", "columns": "ALL",
+            "filter": f'(SECURITY_CODE="{code[2:]}")',
+            "pageNumber": 1, "pageSize": 4,
+            "sortTypes": "-1", "sortColumns": "REPORTDATE"}, timeout=10)
+        data = ((r.json().get("result") or {}).get("data")) or []
+    except Exception:
+        return None
+    if not data:
+        return None
+    ratios = []                               # 盈利期ccr(用于近4期均值)
+    for row in data:
+        eps, ocf = _f(row.get("BASIC_EPS")), _f(row.get("MGJYXJJE"))
+        if eps and eps > 0 and ocf is not None:
+            ratios.append(ocf / eps)
+    latest = data[0]
+    eps = _f(latest.get("BASIC_EPS"))
+    ocf = _f(latest.get("MGJYXJJE"))
+    return {
+        "code": code, "eps": eps, "ocf_ps": ocf,
+        "ccr": round(ocf / eps, 2) if (eps and eps > 0 and ocf is not None) else None,
+        "ccr_avg": round(sum(ratios) / len(ratios), 2) if ratios else None,
+        "report_date": (latest.get("REPORTDATE") or "")[:10],
+    }
 
 
 def fetch_day(date_str):
