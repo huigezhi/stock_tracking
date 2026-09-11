@@ -4,7 +4,7 @@
    - /api/* : 纯网络, 不缓存(行情数据时效性优先), 失败原样透传给应用层处理 */
 'use strict';
 
-const CACHE = 'macd-shell-v1';
+const CACHE = 'macd-shell-v2';
 const SHELL = [
   '/',
   '/static/style.css',

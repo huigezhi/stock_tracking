@@ -51,7 +51,7 @@ async function submitLogin() {
     localStorage.setItem('auth_token', token);
     document.getElementById('loginBox').style.display = 'none';
     // 重新拉取所有数据(loadWatch内部会重建SSE连接)
-    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); loadResonance(); refreshQuotes();
+    loadIdxList(); loadEtfList(); loadWatch(); loadDivs(); loadIntraday(); loadResonance(); refreshQuotes(); renderOverview();
   } catch (e) {
     err.textContent = '网络错误, 请重试';
   }
@@ -103,6 +103,186 @@ function setTheme(mode) {
   });
 })();
 
+/* ================= 视图路由(侧边栏导航) ================= */
+let curView = '';
+const VIEWS = ['overview', 'chart', 'div', 'ai', 'sys'];
+
+function showView(viewId) {
+  if (!VIEWS.includes(viewId)) viewId = 'overview';
+  curView = viewId;
+  document.querySelectorAll('.view').forEach(v =>
+    v.classList.toggle('active', v.id === 'view-' + viewId));
+  document.querySelectorAll('.nav-item').forEach(a =>
+    a.classList.toggle('active', a.dataset.view === viewId));
+  stopAiTimer();   // 面板化的视图按需挂载/卸载数据定时器
+  stopSysTimer();
+  if (viewId === 'overview') {
+    renderOverview();
+  } else if (viewId === 'chart') {
+    /* 由隐藏变可见: 重新测量列表分页 + 重绘图表(隐藏时画布为0×0) */
+    etfPage.size = 0;
+    watchPage.size = 0;
+    renderEtfList();
+    renderWatchList();
+    requestAnimationFrame(() => {
+      if (window.__kchartReady) { KChart.draw(); ShareChart.draw(); }
+    });
+  } else if (viewId === 'ai') {
+    startAiView();
+  } else if (viewId === 'sys') {
+    startSysView();
+  }
+  try { localStorage.setItem('last_view', viewId); } catch (e) { /* 忽略 */ }
+  window.scrollTo(0, 0);
+}
+
+/* 跨视图打开标的: 跳到图表分析视图展示K线 */
+function openStockInChart(name, code, tag) {
+  showView('chart');
+  curEtf = code;
+  document.getElementById('chName').textContent = name || code;
+  document.getElementById('chCode').textContent = code;
+  document.getElementById('chIndex').textContent = tag || '';
+  const p = document.getElementById('chPrice');
+  p.textContent = '--'; p.className = 'ch-price';
+  const c = document.getElementById('chChg');
+  c.textContent = ''; c.className = 'ch-chg';
+  document.getElementById('chAmount').textContent = '--';
+  document.getElementById('chShares').textContent = '--';
+}
+
+/* ================= 概览页 ================= */
+let ovDivRows = [];
+let ovAiRows = [];
+
+async function renderOverview() {
+  const m = document.getElementById('ovMeta');
+  if (m) {
+    m.textContent = new Date().toLocaleDateString('zh-CN',
+        {month: 'long', day: 'numeric', weekday: 'long'}) +
+      ' · ' + (isTradingNow() ? '交易时段' : '休市时段');
+  }
+  renderOvIdx();
+  renderOvDivs();
+  renderOvWatch();
+  loadOvAi();
+}
+
+/* 指数卡片: 点击跳图表分析并选中该指数 */
+function renderOvIdx() {
+  const box = document.getElementById('ovIdxCards');
+  if (!box) return;
+  if (!idxData.length) {
+    box.innerHTML = '<div class="empty" style="grid-column:1/-1">指数数据加载中…</div>';
+    return;
+  }
+  box.innerHTML = idxData.map(i => `
+    <div class="ov-idx ${pctClass(i.chg_pct)}" onclick="ovOpenIdx('${i.code}')">
+      <div class="ov-idx-name">${esc(i.name)}</div>
+      <div class="ov-idx-price ${pctClass(i.chg_pct)}">${i.price.toFixed(2)}</div>
+      <div class="ov-idx-foot">
+        <span class="ov-idx-chg ${pctClass(i.chg_pct)}">${fmtPct(i.chg_pct)}</span>
+        <span class="ov-idx-amt">成交额 ${(i.amount / 1e4).toFixed(0)}亿</span>
+      </div>
+    </div>`).join('');
+}
+
+function ovOpenIdx(code) {
+  showView('chart');
+  selectIdx(code);
+}
+
+/* 最新底背离信号: 最新扫描日按确认日期倒序取前9条 */
+function renderOvDivs() {
+  const box = document.getElementById('ovDivs');
+  if (!box) return;
+  if (!divAll.length) {
+    box.innerHTML = '<div class="empty">暂无底背离信号（交易日 16:00 自动扫描）</div>';
+    ovDivRows = [];
+    return;
+  }
+  const latest = [...new Set(divAll.map(r => r.scan))].sort().reverse()[0];
+  ovDivRows = divAll.filter(r => r.scan === latest)
+      .sort((a, b) => String(b.confirm || '').localeCompare(String(a.confirm || '')) ||
+                       (b.ml_score || 0) - (a.ml_score || 0))
+      .slice(0, 9);
+  box.innerHTML = ovDivRows.length ? ovDivRows.map((r, i) => `
+    <div class="ov-row" onclick="ovOpenDiv(${i})">
+      <span class="ov-n"><b>${esc(r.name)}</b><i>${r.code} · ${r.tf_name}</i></span>
+      ${r.ml_score != null ? `<span class="ov-tag">模型 ${r.ml_score.toFixed(0)}</span>` : ''}
+      <span class="ov-num ${r.chg3 != null ? pctClass(r.chg3) : ''}">${r.chg3 != null ? fmtPct(r.chg3) : '--'}</span>
+      <span class="ov-sub">${esc(r.confirm || r.date2)}</span>
+    </div>`).join('') :
+    '<div class="empty">最新扫描周期暂无信号</div>';
+}
+
+function ovOpenDiv(i) {
+  viewDivRow(ovDivRows[i]);
+}
+
+/* 自选异动: 按当日涨跌幅绝对值排序取前9条 */
+function renderOvWatch() {
+  const box = document.getElementById('ovWatch');
+  if (!box) return;
+  if (!watchData.length) {
+    box.innerHTML = '<div class="empty">暂无自选标的，请在「图表分析」中搜索添加</div>';
+    return;
+  }
+  const rows = watchData
+      .map(s => ({s, q: quoteMap[s.code]}))
+      .filter(x => x.q && x.q.ok && x.q.chg_pct != null)
+      .sort((a, b) => Math.abs(b.q.chg_pct) - Math.abs(a.q.chg_pct))
+      .slice(0, 9);
+  box.innerHTML = rows.length ? rows.map(x => `
+    <div class="ov-row" onclick="ovOpenWatch('${esc(x.s.code)}')">
+      <span class="ov-n"><b>${esc(x.s.name)}</b><i>${esc(x.s.code)} · ${esc(x.s.group || '自选')}</i></span>
+      <span class="ov-num">${x.q.price.toFixed(2)}</span>
+      <span class="ov-num ${pctClass(x.q.chg_pct)}">${fmtPct(x.q.chg_pct)}</span>
+    </div>`).join('') :
+    '<div class="empty">自选行情加载中…</div>';
+}
+
+function ovOpenWatch(code) {
+  showView('chart');
+  selectWatch(code);
+}
+
+/* AI 短线精选预览: 最新一期前5条 */
+async function loadOvAi() {
+  const box = document.getElementById('ovAi');
+  if (!box) return;
+  try {
+    const r = await apiFetch('/api/ai/picks');
+    const d = await r.json();
+    const sub = document.getElementById('ovAiSub');
+    if (sub && d.hour) sub.textContent = `涨停板策略 · 每交易日 ${d.hour}:00 自动运行`;
+    ovAiRows = (d.rows || []).slice(0, 5);
+    if (!d.date || !ovAiRows.length) {
+      box.innerHTML = `<div class="empty">暂无选股结果${d.running ? '，选股运行中…' : ''}，点击右上角「进入 AI 选股」立即体验</div>`;
+      return;
+    }
+    box.innerHTML = ovAiRows.map((r0, i) => {
+      const e = r0.extra || {};
+      return `
+      <div class="ov-row" onclick="ovOpenAi(${i})">
+        <span class="ov-n"><b>${esc(r0.name || r0.code)}</b><i>${r0.code} · ${esc(_zttjTxt(e))}</i></span>
+        ${r0.score != null ? `<span class="ov-tag">动能 ${r0.score.toFixed(0)}</span>` : ''}
+        <span class="ov-num">${esc(e.fbt_s || '--')}</span>
+        <span class="ov-sub">${esc(e.hybk || '--')}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="empty">AI 选股数据获取失败</div>';
+  }
+}
+
+function ovOpenAi(i) {
+  const r = ovAiRows[i];
+  if (!r) return;
+  openStockInChart(r.name || r.code, r.code, 'AI选股 Top' + (i + 1));
+  switchTf('day');
+}
+
 /* ================= 指数列表 ================= */
 let idxData = [];
 
@@ -127,6 +307,7 @@ function renderIdxList() {
       <span class="ep ${pctClass(i.chg_pct)}">${i.price.toFixed(2)}</span>
       <span class="epct ${pctClass(i.chg_pct)}">${fmtPct(i.chg_pct)}</span>
     </div>`).join('');
+  renderOvIdx();
 }
 
 function selectIdx(code) {
@@ -222,6 +403,7 @@ function renderEtfList() {
     return;
   }
   box.innerHTML = etfData.map(etfItemHtml).join('');   // 全量渲染一次以测量行高
+  if (!box.clientHeight) { pgEl.innerHTML = ''; return; }   // 图表视图隐藏中, 显示后再分页
   if (!etfPage.size) {
     const item = box.querySelector('.etf-item');
     if (item) etfPage.size = Math.max(1, Math.floor(box.clientHeight / item.offsetHeight));
@@ -377,6 +559,7 @@ function renderWatchList() {
     return;
   }
   box.innerHTML = watchData.map(watchItemHtml).join('');   // 全量渲染一次以测量行高
+  if (!box.clientHeight) { pgEl.innerHTML = ''; return; }   // 图表视图隐藏中, 显示后再分页
   if (!watchPage.size) {
     const item = box.querySelector('.watch-item');
     if (item) watchPage.size =
@@ -401,6 +584,7 @@ async function loadWatch() {
   groups = [...new Set(stocks.map(s => s.group || '自选'))];
   document.getElementById('count').textContent = stocks.length;
   renderWatchList();
+  renderOvWatch();
   refreshQuotes();
   ensureSSE();   // 自选变化后重连SSE(订阅代码集已变)
 }
@@ -415,6 +599,7 @@ async function refreshQuotes() {
       quoteMap[q.code] = q;
       updateWatchRow(q.code);
     }
+    renderOvWatch();
   } catch (e) { /* 下轮重试 */ }
 }
 
@@ -534,6 +719,7 @@ function applyQuoteDiff(diff) {
     if (code === curEtf) updateChartHeader(q);
   }
   if (listDirty) { renderIdxList(); renderEtfList(); }
+  renderOvWatch();
 }
 
 function updateChartHeader(q) {
@@ -710,14 +896,14 @@ async function addCurToWatch() {
 let sysTimer = null;
 let logLvl = '';
 
-async function openSys() {
-  document.getElementById('sysBox').style.display = 'flex';
+/* 系统状态视图: 进入挂载数据+15秒定时刷新, 离开卸载(由showView统一调度) */
+function startSysView() {
   loadSysData();
-  sysTimer = setInterval(loadSysData, 15000);   // 打开期间15秒刷新
+  clearInterval(sysTimer);
+  sysTimer = setInterval(loadSysData, 15000);
 }
 
-function closeSys() {
-  document.getElementById('sysBox').style.display = 'none';
+function stopSysTimer() {
   clearInterval(sysTimer);
   sysTimer = null;
 }
@@ -813,8 +999,8 @@ let ztPoolRows = [];
 let ztDate = null;
 let aiTab = 'picks';
 
-function openAi() {
-  document.getElementById('aiBox').style.display = 'flex';
+/* AI选股视图: 进入挂载数据+定时刷新(运行中3秒/空闲30秒), 离开卸载(由showView统一调度) */
+function startAiView() {
   loadAiConfig();
   loadAiPicks();
   loadZtPool();
@@ -823,12 +1009,11 @@ function openAi() {
   aiTimer = setInterval(() => {
     aiTicks++;
     if (aiRunning) { loadAiPicks(); loadZtPool(); }
-    else if (aiTicks % 10 === 0) loadAiPicks();   // 运行中3秒/空闲30秒
+    else if (aiTicks % 10 === 0) loadAiPicks();
   }, 3000);
 }
 
-function closeAi() {
-  document.getElementById('aiBox').style.display = 'none';
+function stopAiTimer() {
   clearInterval(aiTimer);
   aiTimer = null;
 }
@@ -1045,18 +1230,7 @@ function renderAiPicks(d) {
 function viewAiPick(i) {
   const r = aiPickRows[i];
   if (!r) return;
-  closeAi();                       // 关面板露出K线
-  curEtf = r.code;
-  document.getElementById('chName').textContent = r.name || r.code;
-  document.getElementById('chCode').textContent = r.code;
-  document.getElementById('chIndex').textContent = 'AI选股 Top' + (i + 1);
-  ['chPrice', 'chChg'].forEach(id => {
-    const el = document.getElementById(id);
-    el.textContent = '--';
-    el.className = el.id;
-  });
-  document.getElementById('chAmount').textContent = '--';
-  document.getElementById('chShares').textContent = '--';
+  openStockInChart(r.name || r.code, r.code, 'AI选股 Top' + (i + 1));
   switchTf('day');
 }
 
@@ -1134,18 +1308,7 @@ function renderMood(m) {
 function viewZtPick(i) {
   const r = ztPoolRows[i];
   if (!r) return;
-  closeAi();                       // 关面板露出K线
-  curEtf = r.code;
-  document.getElementById('chName').textContent = r.name || r.code;
-  document.getElementById('chCode').textContent = r.code;
-  document.getElementById('chIndex').textContent = '涨停池 #' + (i + 1);
-  ['chPrice', 'chChg'].forEach(id => {
-    const el = document.getElementById(id);
-    el.textContent = '--';
-    el.className = el.id;
-  });
-  document.getElementById('chAmount').textContent = '--';
-  document.getElementById('chShares').textContent = '--';
+  openStockInChart(r.name || r.code, r.code, '涨停池 #' + (i + 1));
   switchTf('day');
 }
 
@@ -1267,6 +1430,7 @@ function renderDivs(d) {
   updateDivDateOptions();
   updateDivConfirmOptions();
   applyDivFilters();
+  renderOvDivs();
 }
 
 function updateDivDateOptions() {
@@ -1385,19 +1549,13 @@ function renderDivTable() {
 }
 
 function viewDivIdx(i) {
-  const r = divFiltered[i];
+  viewDivRow(divFiltered[i]);
+}
+
+/* 打开单条底背离信号(信号表行与概览卡片共用): 跳图表分析视图看K线 */
+function viewDivRow(r) {
   if (!r) return;
-  curEtf = r.code;   // 让日K/周K切换按钮作用于该标的
-  document.getElementById('chName').textContent = r.name;
-  document.getElementById('chCode').textContent = r.code;
-  document.getElementById('chIndex').textContent = r.tf_name + '底背离';
-  ['chPrice', 'chChg'].forEach(id => {
-    const el = document.getElementById(id);
-    el.textContent = '--';
-    el.className = el.id;
-  });
-  document.getElementById('chAmount').textContent = '--';
-  document.getElementById('chShares').textContent = '--';
+  openStockInChart(r.name, r.code, r.tf_name + '底背离');
   switchTf(r.tf);
 }
 
@@ -1484,6 +1642,12 @@ function renderStats(s) {
 
 /* chart.js 已完成 KChart/ShareChart 初始化 */
 applyTheme(localStorage.getItem('theme') || 'auto');  // 补一次主题下的绘制
+
+/* 初始视图: 默认概览, 恢复上次使用的视图 */
+(function initView() {
+  const saved = localStorage.getItem('last_view');
+  showView(VIEWS.includes(saved) ? saved : 'overview');
+})();
 
 /* 启动认证探测: 已启用认证且当前token无效则弹登录框, 否则正常加载 */
 (async function probeAuth() {
