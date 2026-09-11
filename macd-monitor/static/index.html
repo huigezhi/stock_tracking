@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MACD 监控 · 自选管理</title>
+<title>MACD 监控终端</title>
 <link rel="stylesheet" href="/static/style.css">
 <!-- PWA: 可安装到主屏幕, 断网时打开离线快照 -->
 <link rel="manifest" href="/static/manifest.webmanifest">
@@ -15,147 +15,290 @@
 <meta name="apple-mobile-web-app-title" content="MACD监控">
 </head>
 <body>
-<header class="topbar">
-  <h1>MACD 监控 · 自选管理</h1>
-  <span class="sub">改动实时写入 config.json，监控进程自动热加载</span>
-  <span class="sse-dot off" id="sseDot" title="SSE 未连接，行情走轮询"></span>
-  <select id="themeSel" onchange="setTheme(this.value)">
-    <option value="auto">跟随系统</option>
-    <option value="light">白天</option>
-    <option value="dark">夜间</option>
-  </select>
-  <button class="sys-btn" id="aiBtn" onclick="openAi()" title="AI短线选股: 涨停池动能分Top30候选 → DeepSeek游资视角精选10只, 每交易日18:00自动">AI选股</button>
-  <button class="sys-btn" id="sysBtn" onclick="openSys()" title="系统健康与事件日志">系统</button>
-</header>
-<div class="offline-banner" id="offlineBanner" style="display:none">
-  网络已断开，正在展示离线内容，行情暂停更新
-</div>
-<div class="ios-guide" id="iosGuide" style="display:none">
-  <span>💡 添加到主屏幕：Safari 底部分享 → 「添加到主屏幕」，即可全屏类App使用</span>
-  <button onclick="dismissIosGuide()">知道了</button>
-</div>
+<div class="shell">
 
-<main class="layout">
-  <!-- 左栏: 指数 + 宽基ETF列表 -->
-  <aside class="panel etf-panel">
-    <div class="idx-sec">
-      <div class="panel-head">
-        <h2>主要指数</h2>
-        <span class="upd" id="etfUpd"></span>
-      </div>
-      <div id="idxList" class="etf-list"><div class="empty">加载中…</div></div>
+  <!-- ============ 左侧导航栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">M</div>
+      <div class="brand-txt"><b>MACD 监控</b><span>行情 · 信号 · AI</span></div>
     </div>
-    <div class="panel-head">
-      <h2>宽基ETF <small>份额≥100亿份</small></h2>
+    <nav class="side-nav">
+      <div class="nav-group">总览</div>
+      <a class="nav-item active" data-view="overview" onclick="showView('overview')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>概览</span>
+      </a>
+      <div class="nav-group">功能区</div>
+      <a class="nav-item" data-view="chart" onclick="showView('chart')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 3v3.5M7 16.5V21M17 3v6M17 18v3"/><rect x="4.5" y="6.5" width="5" height="10" rx="1"/><rect x="14.5" y="9" width="5" height="9" rx="1"/></svg>
+        <span>图表分析</span>
+      </a>
+      <a class="nav-item" data-view="div" onclick="showView('div')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12h4l3-7.5 4.5 15 3-7.5h4.5"/></svg>
+        <span>底背离信号</span>
+      </a>
+      <a class="nav-item" data-view="ai" onclick="showView('ai')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M11 4l1.6 4L16.5 9.6 12.6 11.2 11 15.2 9.4 11.2 5.5 9.6 9.4 8z"/><path d="M18.5 13.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
+        <span>AI 选股</span>
+      </a>
+      <a class="nav-item" data-view="sys" onclick="showView('sys')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12.5 14H17"/></svg>
+        <span>系统状态</span>
+      </a>
+    </nav>
+    <div class="side-foot">
+      <span class="sse-dot off" id="sseDot" title="SSE 未连接，行情走轮询"></span>
+      <span class="side-foot-txt">实时推送</span>
+      <select id="themeSel" onchange="setTheme(this.value)">
+        <option value="auto">跟随系统</option>
+        <option value="light">白天</option>
+        <option value="dark">夜间</option>
+      </select>
     </div>
-    <div id="etfList" class="etf-list"><div class="empty">加载中…</div></div>
-    <div class="pager" id="etfPager"></div>
   </aside>
 
-  <!-- 中栏: K线图 -->
-  <section class="panel chart-panel">
-    <div class="chart-head">
-      <div class="ch-left">
-        <span class="ch-name" id="chName">--</span>
-        <span class="ch-code" id="chCode"></span>
-        <span class="ch-tag" id="chIndex"></span>
-      </div>
-      <div class="ch-quotes" id="chQuotes">
-        <span class="ch-price" id="chPrice">--</span>
-        <span class="ch-chg" id="chChg">--</span>
-        <span class="ch-item">成交额 <b id="chAmount">--</b></span>
-        <span class="ch-item">份额 <b id="chShares">--</b></span>
-      </div>
-      <div class="tf-tabs">
-        <button class="tf" data-tf="min" onclick="switchTf('min')" title="当日分时走势, 交易时段8秒自动刷新">分时</button>
-        <button class="tf active" data-tf="day" onclick="switchTf('day')">日K</button>
-        <button class="tf" data-tf="week" onclick="switchTf('week')">周K</button>
-        <button class="tf-add" onclick="addCurToWatch()" title="将当前查看的标的加入右侧监控列表(默认分组: 自选)">＋自选</button>
-      </div>
+  <!-- ============ 右侧内容区 ============ -->
+  <div class="main">
+    <div class="offline-banner" id="offlineBanner" style="display:none">
+      网络已断开，正在展示离线内容，行情暂停更新
     </div>
-    <div class="chart-body" id="chartBody">
-      <canvas id="kchart"></canvas>
-      <div class="chart-tip" id="chartTip"></div>
+    <div class="ios-guide" id="iosGuide" style="display:none">
+      <span>💡 添加到主屏幕：Safari 底部分享 → 「添加到主屏幕」，即可全屏类App使用</span>
+      <button onclick="dismissIosGuide()">知道了</button>
     </div>
-    <div class="chart-slider">
-      <div class="range-wrap" id="rangeWrap">
-        <div class="range-track"><div class="range-fill" id="rangeFill"></div></div>
-        <input type="range" id="rStart" min="0" max="100" value="0">
-        <input type="range" id="rEnd" min="0" max="100" value="100">
-        <span class="range-label" id="rStartLabel"></span>
-        <span class="range-label right" id="rEndLabel"></span>
-      </div>
-      <span class="slider-count" id="sliderCount"></span>
-    </div>
-    <div class="share-panel">
-      <div class="share-head">
-        <h3>价格 / 份额变动 <small>价格(左轴) · 份额增减(右轴, 亿份)，随日K/周K切换</small></h3>
-        <span class="share-tip" id="shareTip"></span>
-      </div>
-      <div class="share-body" id="shareBody">
-        <canvas id="shareChart"></canvas>
-      </div>
-    </div>
-  </section>
 
-  <!-- 右栏: MACD 监控 -->
-  <aside class="panel monitor-panel">
-    <div class="search-row">
-      <input id="q" placeholder="搜索：贵州茅台 / gzmt / 510300 / 沪深300" autofocus>
-      <button class="primary" onclick="doSearch()">搜索</button>
-    </div>
-    <div class="hint">支持 A 股、指数、ETF / LOF</div>
-    <div id="results"></div>
-    <h2 class="watch-title">监控列表（<span id="count">0</span>）<span class="upd" id="upd"></span></h2>
-    <div id="watch"></div>
-    <div class="pager" id="watchPager"></div>
-  </aside>
+    <main class="content">
 
-  <!-- 底背离标的面板: 横贯三栏全宽 -->
-  <div class="panel div-panel">
-    <div class="div-head">
-      <h3>日线 / 周线底背离标的 <small>全部A股扫描 · 交易日16:00自动更新 · 可手动立即更新 · 仅最近100周期 · 点击行查看K线 · 表头点击排序</small></h3>
-      <span class="upd"><button class="stats-btn" onclick="openStats()" title="信号胜率复盘统计">复盘统计</button><button class="stats-btn" id="divRescanBtn" onclick="triggerDivRescan()" title="立即重扫全市场底背离(不影响16:00定时扫描)">立即更新</button><button class="stats-btn" onclick="exportDivs()" title="将当前筛选结果导出为CSV(含Excel中文兼容)">导出</button><span id="divUpd"></span></span>
-    </div>
-    <div class="div-filters">
-      <select id="divDate" onchange="applyDivFilters()" title="按扫描日期筛选"></select>
-      <select id="divConfirm" onchange="applyDivFilters()" title="按确认日期筛选"></select>
-      <select id="divTf" onchange="applyDivFilters()">
-        <option value="">日线 + 周线</option>
-        <option value="day" selected>日线底背离</option>
-        <option value="week">周线底背离</option>
-      </select>
-      <select id="divWatch" onchange="applyDivFilters()" title="按是否自选股筛选">
-        <option value="">全部标的</option>
-        <option value="1">自选股</option>
-        <option value="0">非自选股</option>
-      </select>
-      <input id="divQ" placeholder="筛选名称 / 代码" oninput="applyDivFilters()">
-      <span class="div-count" id="divCount"></span>
-    </div>
-    <div class="div-table-wrap">
-      <table class="div-table">
-        <thead><tr>
-          <th>序号</th>
-          <th class="sortable" id="sortName" onclick="toggleDivSort('name')">股票<span class="si"></span></th>
-          <th class="sortable" id="sortTf" onclick="toggleDivSort('tf')">周期<span class="si"></span></th>
-          <th class="sortable" id="sortDate2" onclick="toggleDivSort('date2')">底背离日期<span class="si"></span></th>
-          <th class="sortable" id="sortPrice2" onclick="toggleDivSort('price2')">价格变化<span class="si"></span></th>
-          <th class="sortable" id="sortDif2" onclick="toggleDivSort('dif2')">DIF变化<span class="si"></span></th>
-          <th class="sortable" id="sortDifInc" onclick="toggleDivSort('dif_inc')">DIF增加值<span class="si"></span></th>
-          <th class="sortable" id="sortChg3" onclick="toggleDivSort('chg3')">3周期涨幅<span class="si"></span></th>
-          <th class="sortable" id="sortChg5" onclick="toggleDivSort('chg5')">5周期涨幅<span class="si"></span></th>
-          <th class="sortable" id="sortMl" onclick="toggleDivSort('ml_score')" title="元标签模型质量分(0-100), 分数越高历史同类信号胜率越高">模型分<span class="si"></span></th>
-          <th class="sortable" id="sortScore" onclick="toggleDivSort('score')">共振分<span class="si"></span></th>
-          <th class="sortable" id="sortConfirm" onclick="toggleDivSort('confirm')">确认日期<span class="si"> ▼</span></th>
-        </tr></thead>
-        <tbody id="divBody">
-          <tr><td colspan="12" class="empty">加载中…</td></tr>
-        </tbody>
-      </table>
-    </div>
+      <!-- ===== 视图: 概览 ===== -->
+      <section class="view active" id="view-overview">
+        <header class="view-head">
+          <div>
+            <h2>概览</h2>
+            <p class="vh-sub">市场总览 · 今日信号 · 自选异动 · 短线机会，点击卡片深入功能区</p>
+          </div>
+          <div class="vh-meta mono" id="ovMeta"></div>
+        </header>
+        <div class="ov-cards" id="ovIdxCards"></div>
+        <div class="ov-grid">
+          <div class="panel ov-card">
+            <div class="ov-card-head">
+              <h3>最新底背离信号 <small>最新扫描日 · 按确认日期排序</small></h3>
+              <a class="ov-more" onclick="showView('div')">全部信号 →</a>
+            </div>
+            <div id="ovDivs" class="ov-list"></div>
+          </div>
+          <div class="panel ov-card">
+            <div class="ov-card-head">
+              <h3>自选异动 <small>按当日涨跌幅排序</small></h3>
+              <a class="ov-more" onclick="showView('chart')">管理自选 →</a>
+            </div>
+            <div id="ovWatch" class="ov-list"></div>
+          </div>
+        </div>
+        <div class="panel ov-ai">
+          <div class="ov-card-head">
+            <h3>AI 短线精选 <small id="ovAiSub">涨停板策略 · 每交易日 18:00 自动运行</small></h3>
+            <a class="ov-more" onclick="showView('ai')">进入 AI 选股 →</a>
+          </div>
+          <div id="ovAi" class="ov-ai-body"></div>
+        </div>
+      </section>
+
+      <!-- ===== 视图: 图表分析(工作台) ===== -->
+      <section class="view" id="view-chart">
+        <div class="layout">
+          <!-- 左栏: 指数 + 宽基ETF列表 -->
+          <aside class="panel etf-panel">
+            <div class="idx-sec">
+              <div class="panel-head">
+                <h2>主要指数</h2>
+                <span class="upd" id="etfUpd"></span>
+              </div>
+              <div id="idxList" class="etf-list"><div class="empty">加载中…</div></div>
+            </div>
+            <div class="panel-head">
+              <h2>宽基ETF <small>份额≥100亿份</small></h2>
+            </div>
+            <div id="etfList" class="etf-list"><div class="empty">加载中…</div></div>
+            <div class="pager" id="etfPager"></div>
+          </aside>
+
+          <!-- 中栏: K线图 -->
+          <section class="panel chart-panel">
+            <div class="chart-head">
+              <div class="ch-left">
+                <span class="ch-name" id="chName">--</span>
+                <span class="ch-code" id="chCode"></span>
+                <span class="ch-tag" id="chIndex"></span>
+              </div>
+              <div class="ch-quotes" id="chQuotes">
+                <span class="ch-price" id="chPrice">--</span>
+                <span class="ch-chg" id="chChg">--</span>
+                <span class="ch-item">成交额 <b id="chAmount">--</b></span>
+                <span class="ch-item">份额 <b id="chShares">--</b></span>
+              </div>
+              <div class="tf-tabs">
+                <button class="tf" data-tf="min" onclick="switchTf('min')" title="当日分时走势, 交易时段8秒自动刷新">分时</button>
+                <button class="tf active" data-tf="day" onclick="switchTf('day')">日K</button>
+                <button class="tf" data-tf="week" onclick="switchTf('week')">周K</button>
+                <button class="tf-add" onclick="addCurToWatch()" title="将当前查看的标的加入右侧监控列表(默认分组: 自选)">＋自选</button>
+              </div>
+            </div>
+            <div class="chart-body" id="chartBody">
+              <canvas id="kchart"></canvas>
+              <div class="chart-tip" id="chartTip"></div>
+            </div>
+            <div class="chart-slider">
+              <div class="range-wrap" id="rangeWrap">
+                <div class="range-track"><div class="range-fill" id="rangeFill"></div></div>
+                <input type="range" id="rStart" min="0" max="100" value="0">
+                <input type="range" id="rEnd" min="0" max="100" value="100">
+                <span class="range-label" id="rStartLabel"></span>
+                <span class="range-label right" id="rEndLabel"></span>
+              </div>
+              <span class="slider-count" id="sliderCount"></span>
+            </div>
+            <div class="share-panel">
+              <div class="share-head">
+                <h3>价格 / 份额变动 <small>价格(左轴) · 份额增减(右轴, 亿份)，随日K/周K切换</small></h3>
+                <span class="share-tip" id="shareTip"></span>
+              </div>
+              <div class="share-body" id="shareBody">
+                <canvas id="shareChart"></canvas>
+              </div>
+            </div>
+          </section>
+
+          <!-- 右栏: 自选搜索 + MACD 监控 -->
+          <aside class="panel monitor-panel">
+            <div class="search-row">
+              <input id="q" placeholder="搜索：贵州茅台 / gzmt / 510300 / 沪深300">
+              <button class="primary" onclick="doSearch()">搜索</button>
+            </div>
+            <div class="hint">支持 A 股、指数、ETF / LOF</div>
+            <div id="results"></div>
+            <h2 class="watch-title">监控列表（<span id="count">0</span>）<span class="upd" id="upd"></span></h2>
+            <div id="watch"></div>
+            <div class="pager" id="watchPager"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ===== 视图: 底背离信号 ===== -->
+      <section class="view" id="view-div">
+        <header class="view-head">
+          <div>
+            <h2>底背离信号</h2>
+            <p class="vh-sub">全部A股扫描 · 交易日16:00自动更新 · 仅最近100周期 · 点击行查看K线 · 表头点击排序</p>
+          </div>
+          <div class="vh-actions">
+            <button class="stats-btn" onclick="openStats()" title="信号胜率复盘统计">复盘统计</button>
+            <button class="stats-btn" id="divRescanBtn" onclick="triggerDivRescan()" title="立即重扫全市场底背离(不影响16:00定时扫描)">立即更新</button>
+            <button class="stats-btn" onclick="exportDivs()" title="将当前筛选结果导出为CSV(含Excel中文兼容)">导出</button>
+            <span class="vh-meta mono" id="divUpd"></span>
+          </div>
+        </header>
+        <div class="panel div-panel">
+          <div class="div-filters">
+            <select id="divDate" onchange="applyDivFilters()" title="按扫描日期筛选"></select>
+            <select id="divConfirm" onchange="applyDivFilters()" title="按确认日期筛选"></select>
+            <select id="divTf" onchange="applyDivFilters()">
+              <option value="">日线 + 周线</option>
+              <option value="day" selected>日线底背离</option>
+              <option value="week">周线底背离</option>
+            </select>
+            <select id="divWatch" onchange="applyDivFilters()" title="按是否自选股筛选">
+              <option value="">全部标的</option>
+              <option value="1">自选股</option>
+              <option value="0">非自选股</option>
+            </select>
+            <input id="divQ" placeholder="筛选名称 / 代码" oninput="applyDivFilters()">
+            <span class="div-count" id="divCount"></span>
+          </div>
+          <div class="div-table-wrap">
+            <table class="div-table">
+              <thead><tr>
+                <th>序号</th>
+                <th class="sortable" id="sortName" onclick="toggleDivSort('name')">股票<span class="si"></span></th>
+                <th class="sortable" id="sortTf" onclick="toggleDivSort('tf')">周期<span class="si"></span></th>
+                <th class="sortable" id="sortDate2" onclick="toggleDivSort('date2')">底背离日期<span class="si"></span></th>
+                <th class="sortable" id="sortPrice2" onclick="toggleDivSort('price2')">价格变化<span class="si"></span></th>
+                <th class="sortable" id="sortDif2" onclick="toggleDivSort('dif2')">DIF变化<span class="si"></span></th>
+                <th class="sortable" id="sortDifInc" onclick="toggleDivSort('dif_inc')">DIF增加值<span class="si"></span></th>
+                <th class="sortable" id="sortChg3" onclick="toggleDivSort('chg3')">3周期涨幅<span class="si"></span></th>
+                <th class="sortable" id="sortChg5" onclick="toggleDivSort('chg5')">5周期涨幅<span class="si"></span></th>
+                <th class="sortable" id="sortMl" onclick="toggleDivSort('ml_score')" title="元标签模型质量分(0-100), 分数越高历史同类信号胜率越高">模型分<span class="si"></span></th>
+                <th class="sortable" id="sortScore" onclick="toggleDivSort('score')">共振分<span class="si"></span></th>
+                <th class="sortable" id="sortConfirm" onclick="toggleDivSort('confirm')">确认日期<span class="si"> ▼</span></th>
+              </tr></thead>
+              <tbody id="divBody">
+                <tr><td colspan="12" class="empty">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图: AI 选股 ===== -->
+      <section class="view" id="view-ai">
+        <header class="view-head">
+          <div>
+            <h2>AI 短线选股</h2>
+            <p class="vh-sub">涨停板策略 · <span id="aiSub"></span></p>
+          </div>
+        </header>
+        <div class="panel ai-page">
+          <div class="ai-cfg">
+            <input type="password" id="aiKey" class="ai-in key" placeholder="DeepSeek API Key（尚未配置）" autocomplete="off">
+            <input type="text" id="aiModel" class="ai-in model" placeholder="deepseek-v4-flash" autocomplete="off">
+            <button class="stats-btn" id="aiSaveBtn" onclick="saveAiCfg()">保存配置</button>
+            <button class="stats-btn" id="aiTestBtn" onclick="testAi()">测试连接</button>
+            <button class="stats-btn" id="aiRunBtn" onclick="runAiPick()">立即选股</button>
+            <button class="stats-btn" id="ztScanBtn" onclick="triggerZtScan()" title="手动抓取当日涨停/炸板/跌停股池(交易日15:20自动, 周末可补历史)">扫描涨停池</button>
+            <button class="stats-btn ai-clear" onclick="clearAiKey()" title="清除已保存的API Key">清除Key</button>
+          </div>
+          <div class="ai-status" id="aiStatus">加载中…</div>
+          <div class="mood-strip" id="aiMood" style="display:none"></div>
+          <div class="ai-tabs">
+            <button class="ai-tab active" id="tabPicks" onclick="switchAiTab('picks')">AI 精选</button>
+            <button class="ai-tab" id="tabPool" onclick="switchAiTab('pool')">涨停股池</button>
+            <span class="ai-stats" id="aiStats"></span>
+          </div>
+          <div class="ai-tip">短线策略：每个交易日 15:20 抓取当日涨停股池（剔除 ST/科创板/北交所）并计算动能分与市场情绪温度；18:00 按动能分 Top30 候选 → DeepSeek 以游资视角精选次日胜率最高的 10 只。候选附现金转化率（经营现金流/利润）用于财务排雷：≥1 利润含金量高，&lt;0.3 警惕应收堆积，亏损且现金流为负（失血）的剔除。未配置 Key 时降级为动能分 Top10。点击行查看K线。</div>
+          <div class="ai-picks" id="aiPicks">加载中…</div>
+          <div class="ai-picks" id="ztPool" style="display:none">加载中…</div>
+        </div>
+      </section>
+
+      <!-- ===== 视图: 系统状态 ===== -->
+      <section class="view" id="view-sys">
+        <header class="view-head">
+          <div>
+            <h2>系统状态</h2>
+            <p class="vh-sub">运行健康快照与事件日志 · 打开本页期间每15秒自动刷新</p>
+          </div>
+        </header>
+        <div class="panel sys-page">
+          <div class="sys-health" id="sysHealth">加载中…</div>
+          <div class="sys-loghead">
+            <span class="sys-logtitle">事件日志</span>
+            <span class="sys-lvls" id="sysLvls">
+              <button class="active" data-lvl="" onclick="setLogLvl(this)">全部</button>
+              <button data-lvl="ERROR" onclick="setLogLvl(this)">错误</button>
+              <button data-lvl="WARN" onclick="setLogLvl(this)">警告</button>
+              <button data-lvl="INFO" onclick="setLogLvl(this)">信息</button>
+            </span>
+          </div>
+          <div class="sys-logs" id="sysLogs"></div>
+        </div>
+      </section>
+
+    </main>
   </div>
-</main>
+</div>
+
+<!-- 复盘统计弹窗(跨视图分析工具, 保留弹层) -->
 <div class="stats-mask" id="statsBox" style="display:none" onclick="if(event.target===this)closeStats()">
   <div class="stats-card">
     <div class="stats-head">
@@ -163,55 +306,6 @@
       <button class="stats-close" onclick="closeStats()">✕</button>
     </div>
     <div class="stats-body" id="statsBody">加载中…</div>
-  </div>
-</div>
-<div class="sys-mask" id="sysBox" style="display:none" onclick="if(event.target===this)closeSys()">
-  <div class="sys-card">
-    <div class="sys-head">
-      <span>系统状态</span>
-      <button class="sys-close" onclick="closeSys()">✕</button>
-    </div>
-    <div class="sys-health" id="sysHealth">加载中…</div>
-    <div class="sys-loghead">
-      <span class="sys-logtitle">事件日志</span>
-      <span class="sys-lvls" id="sysLvls">
-        <button class="active" data-lvl="" onclick="setLogLvl(this)">全部</button>
-        <button data-lvl="ERROR" onclick="setLogLvl(this)">错误</button>
-        <button data-lvl="WARN" onclick="setLogLvl(this)">警告</button>
-        <button data-lvl="INFO" onclick="setLogLvl(this)">信息</button>
-      </span>
-    </div>
-    <div class="sys-logs" id="sysLogs"></div>
-  </div>
-</div>
-<div class="ai-mask" id="aiBox" style="display:none" onclick="if(event.target===this)closeAi()">
-  <div class="ai-card">
-    <div class="ai-head">
-      <span class="login-title">AI 短线选股 · 涨停板策略</span>
-      <span class="ai-sub" id="aiSub"></span>
-      <button class="stats-close" onclick="closeAi()">✕</button>
-    </div>
-    <div class="ai-body">
-      <div class="ai-cfg">
-        <input type="password" id="aiKey" class="ai-in key" placeholder="DeepSeek API Key（尚未配置）" autocomplete="off">
-        <input type="text" id="aiModel" class="ai-in model" placeholder="deepseek-v4-flash" autocomplete="off">
-        <button class="stats-btn" id="aiSaveBtn" onclick="saveAiCfg()">保存配置</button>
-        <button class="stats-btn" id="aiTestBtn" onclick="testAi()">测试连接</button>
-        <button class="stats-btn" id="aiRunBtn" onclick="runAiPick()">立即选股</button>
-        <button class="stats-btn" id="ztScanBtn" onclick="triggerZtScan()" title="手动抓取当日涨停/炸板/跌停股池(交易日15:20自动, 周末可补历史)">扫描涨停池</button>
-        <button class="stats-btn ai-clear" onclick="clearAiKey()" title="清除已保存的API Key">清除Key</button>
-      </div>
-      <div class="ai-status" id="aiStatus">加载中…</div>
-      <div class="mood-strip" id="aiMood" style="display:none"></div>
-      <div class="ai-tabs">
-        <button class="ai-tab active" id="tabPicks" onclick="switchAiTab('picks')">AI 精选</button>
-        <button class="ai-tab" id="tabPool" onclick="switchAiTab('pool')">涨停股池</button>
-        <span class="ai-stats" id="aiStats"></span>
-      </div>
-      <div class="ai-tip">短线策略：每个交易日 15:20 抓取当日涨停股池（剔除 ST/科创板/北交所）并计算动能分与市场情绪温度；18:00 按动能分 Top30 候选 → DeepSeek 以游资视角精选次日胜率最高的 10 只。候选附现金转化率（经营现金流/利润）用于财务排雷：≥1 利润含金量高，&lt;0.3 警惕应收堆积，亏损且现金流为负（失血）的剔除。未配置 Key 时降级为动能分 Top10。点击行查看K线。</div>
-      <div class="ai-picks" id="aiPicks">加载中…</div>
-      <div class="ai-picks" id="ztPool" style="display:none">加载中…</div>
-    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
