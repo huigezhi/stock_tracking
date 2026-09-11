@@ -1249,6 +1249,7 @@ function renderDivs(d) {
   }
   upd.textContent = txt;
   updateDivDateOptions();
+  updateDivConfirmOptions();
   applyDivFilters();
 }
 
@@ -1260,6 +1261,18 @@ function updateDivDateOptions() {
       dates.map(dt => `<option value="${dt}">${dt}</option>`).join('');
   // 默认选最新交易日; 用户已改选则保持
   sel.value = dates.includes(cur) ? cur : (dates[0] || '');
+}
+
+/* 确认日期下拉(按底层数据去重, 默认全部, 用户改选后保持) */
+function updateDivConfirmOptions() {
+  const sel = document.getElementById('divConfirm');
+  if (!sel) return;
+  const cur = sel.value;
+  const dates = [...new Set(divAll.map(r => r.confirm).filter(Boolean))]
+      .sort().reverse();
+  sel.innerHTML = '<option value="">确认日: 全部</option>' +
+      dates.map(dt => `<option value="${dt}">确认日: ${dt}</option>`).join('');
+  sel.value = dates.includes(cur) ? cur : '';
 }
 
 /* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
@@ -1288,10 +1301,12 @@ function applyDivFilters() {
   const q = document.getElementById('divQ').value.trim().toLowerCase();
   const tf = document.getElementById('divTf').value;
   const date = document.getElementById('divDate').value;
+  const confirm = document.getElementById('divConfirm').value;
   const watch = document.getElementById('divWatch').value;
   divFiltered = divAll.filter(r =>
       (!tf || r.tf === tf) &&
       (!date || r.scan === date) &&
+      (!confirm || (r.confirm || '') === confirm) &&
       (watch === '' || !!r.watch === (watch === '1')) &&
       (!q || r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q)));
   renderDivTable();
