@@ -111,6 +111,55 @@ EOF
     systemctl restart "${SVC_MONITOR}" "${SVC_WEBUI}"
 }
 
+# ---------- 4.5 模型自动重训(交易日 06:00 迭代模型分) ----------
+install_retrain() {
+    info "安装模型自动重训(timer: 周一~五 06:00, 脚本内再校验交易日)..."
+    # 训练需要 scikit-learn / numpy (data.db 与 K线网络均在本机, 每天16:00扫描已入库)
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "未找到 python3, 跳过模型重训安装"
+        return
+    fi
+    python3 -c "import sklearn, numpy" 2>/dev/null \
+        || pip3 install --no-cache-dir scikit-learn numpy \
+        || warn "scikit-learn/numpy 安装失败, 稍后可执行 install_retrain.sh 补装"
+
+    # 旧版本(无 retrain_daily.py)保护: 文件拉取到才装 timer
+    if [[ ! -f "${APP_DIR}/macd-monitor/retrain_daily.py" ]]; then
+        warn "代码中暂无 retrain_daily.py, 跳过重训 timer(待代码更新后重跑本脚本)"
+        return
+    fi
+
+    cat > "/etc/systemd/system/macd-retrain.service" <<EOF
+[Unit]
+Description=MACD divergence model daily retrain (trading days 06:00)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${APP_DIR}/macd-monitor
+ExecStart=/usr/bin/python3 ${APP_DIR}/macd-monitor/retrain_daily.py
+Environment=TZ=Asia/Shanghai
+EOF
+
+    cat > "/etc/systemd/system/macd-retrain.timer" <<EOF
+[Unit]
+Description=Daily model retrain timer (trading mornings 06:00)
+
+[Timer]
+OnCalendar=Mon,Tue,Wed,Thu,Fri 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now macd-retrain.timer 2>/dev/null || true
+    systemctl start macd-retrain.timer
+    info "已启用 macd-retrain.timer, 训练日志: ${APP_DIR}/macd-monitor/retrain.log"
+}
+
 # ---------- 5. 自检 ----------
 health_check() {
     sleep 3
@@ -137,6 +186,7 @@ main() {
     fetch_code
     setup_config
     install_services
+    install_retrain
     health_check
     echo
     info "部署完成! 常用命令:"
@@ -144,6 +194,8 @@ main() {
     echo "  journalctl -u ${SVC_MONITOR} -f     # 实时查看监控日志"
     echo "  systemctl restart ${SVC_MONITOR}   # 重启监控"
     echo "  vim ${APP_DIR}/macd-monitor/config.json  # 修改配置(改后重启生效)"
+    echo "  systemctl list-timers macd-retrain  # 查看模型重训下次触发(交易日06:00)"
+    echo "  tail -f ${APP_DIR}/macd-monitor/retrain.log  # 查看重训日志"
     echo
     info "访问 Web UI(本机电脑执行): ssh -L 8688:127.0.0.1:8688 root@你的VPS"
     info "然后浏览器打开 http://localhost:8688"
