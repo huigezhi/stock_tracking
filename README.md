@@ -20,7 +20,7 @@ MA5/10/20/60 均线、MACD 副图（DIF/DEA/柱，与主图窗口联动缩放）
 
 ### 底背离标的面板
 
-全市场（约5200只A股）日线/周线底背离扫描结果：共振评分徽章、DIF增加值、后3/5周期涨幅、确认日期等，**全宽展示**（横贯三栏），**全部列均可点击表头排序**（升降序切换），点击行直接在K线图打开该标的。
+全市场（约5200只A股）日线/周线底背离扫描结果：模型分、共振评分徽章、DIF增加值、后3/5周期涨幅、确认日期等，**全宽展示**（横贯三栏），**全部列均可点击表头排序**（升降序切换），点击行直接在K线图打开该标的。
 
 ![底背离标的面板](docs/screenshots/divergence-panel.png)
 
@@ -123,13 +123,17 @@ MA5/10/20/60 均线、MACD 副图（DIF/DEA/柱，与主图窗口联动缩放）
 
   * **共振评分**：每个信号基于已拉取的K线本地计算多指标共振标签并加权打分（缩量+2 / 均线托底+2 / RSI修复+1 / KDJ金叉+1 / 周线同向+2 / 放量反包+1，满分9），表格"共振分"列展示分数与标签徽章（可排序），高分信号多指标共振更强
 
+  * **模型分（元标签质量模型）**：对每个信号用 Logistic 回归元标签模型打 0-100 质量分——18 个基础特征 + 15 个交互项（RSI 超卖 / DIF 抬升强度 / 零轴深度 / 缩量 / 均线位置等，全部只用确认日及之前数据，无未来函数），训练标签用三重障碍法（+2ATR 上障碍 / -1ATR 下障碍 / 确认日后 10 根K线垂直障碍，先触上障碍计胜）。模型权重序列化在 `model.json`，线上纯 Python 打分不依赖 sklearn；分数越高代表历史同类信号胜率越高，表头可排序
+
+  * **模型每日自动迭代**：交易日早 6:00 自动重训（`macd-retrain.timer`）——回填最新信号的前向收益 → 重建数据集 → walk-forward 样本外评估（无泄漏时间切分）→ 全量训练更新 `model.json`，持续吸收已走出结果的新信号提升胜率；周末与节假日（内置交易所年度休市表）自动跳过；训练日志写入 `retrain.log`。重训只影响新信号打分，如需刷新库内存量信号的模型分可运行 `python3 backfill_ml.py`
+
   * **信号跟踪与复盘统计**：每日17:00后台回填每个信号确认日收盘后 3/5/10/20/60 个交易日的收益；底背离面板右上"复盘统计"弹窗展示总览胜率/平均收益卡片，及按周期、共振分层、确认月份分层的胜率矩阵——用数据校准共振权重、评估信号质量
 
-  * 表格上方**筛选栏**：按扫描日期（默认最新交易日）/ 周期（默认日线）/ 是否自选股 / 名称代码关键字组合筛选，实时显示命中条数
+  * 表格上方**筛选栏**：按扫描日期（默认最新交易日）/ **确认日期** / 周期（默认日线）/ 是否自选股 / 名称代码关键字组合筛选，实时显示命中条数
 
-  * 展示序号、股票基本信息（名称 / 代码）、底背离日期区间、价格与 DIF 变化、**DIF增加值**、**后3/5周期涨幅**、**共振分**、确认日期
+  * 展示序号、股票基本信息（名称 / 代码）、底背离日期区间、价格与 DIF 变化、**DIF增加值**、**后3/5周期涨幅**、**模型分**、**共振分**、确认日期
 
-  * **确认日期 / DIF增加值 / 3周期涨幅 / 5周期涨幅 / 共振分**五列表头可点击排序（升序/降序切换，K线不足显示"--"）
+  * 除序号外**全部列表头可点击排序**（升序/降序切换，K线不足显示"--"）
 
   * 默认按确认日期倒序，确认日期 = 第二个低点被确认为DIF极值的日期（其后4根K线收盘后信号才成立）
 
@@ -251,6 +255,11 @@ python3 webui.py
 
 # 重跑今日底背离全量扫描(清除当日缓存, 保留其余29天历史)
 python3 webui.py --rescan
+
+# 信号质量模型(模型分)训练与刷新(需额外依赖: pip3 install scikit-learn numpy)
+python3 train_model.py       # 回填收益→构建数据集→walk-forward样本外评估→训练保存 model.json
+python3 backfill_ml.py       # (可选)训练/重训后为库内存量信号刷新模型分
+python3 retrain_daily.py     # (可选)手动触发一次"每日重训"(非交易日自动跳过, 同早6点定时任务)
 ```
 
 ## VPS 服务器部署（systemd 开机自启）
@@ -259,7 +268,7 @@ python3 webui.py --rescan
 sudo bash deploy.sh
 ```
 
-部署脚本会自动：安装依赖 → 克隆代码到 `/opt/macd-monitor` → 生成配置 → 注册 systemd 服务（`macd-monitor` / `macd-webui`）→ 自检。
+部署脚本会自动：安装依赖 → 克隆代码到 `/opt/macd-monitor` → 生成配置 → 注册 systemd 服务（`macd-monitor` / `macd-webui`）→ 安装模型每日重训定时器（`macd-retrain.timer`，交易日早 6:00 自动重训信号质量模型，自动补装 `scikit-learn`/`numpy`）→ 自检。脚本可重复执行（幂等），更新代码后重跑即可。
 
 Web UI 默认仅监听本机，通过 SSH 隧道访问：
 
@@ -274,7 +283,15 @@ ssh -L 8688:127.0.0.1:8688 root@你的VPS
 systemctl status macd-monitor macd-webui   # 服务状态
 journalctl -u macd-monitor -f              # 实时监控日志
 systemctl restart macd-monitor              # 重启监控
+systemctl list-timers macd-retrain         # 模型重训下次触发时间（交易日06:00）
+tail -f /opt/macd-monitor/macd-monitor/retrain.log   # 模型重训日志
 ```
+
+模型重训说明：
+
+* 首次训练需累计 ≥300 条已回填收益的信号样本（新装机器等数据积累，期间 `model.json` 不存在、模型分列为"--"，不影响其他功能）
+* 非交易日（周末 + 内置交易所年度休市表，当前为 2026 年）自动跳过；跨年时按交易所次年休市通知更新 `macd-monitor/retrain_daily.py` 中的 `HOLIDAYS_YYYY` 表即可
+* 存量部署若只想补装重训定时器（不重跑整个部署），可单独执行：`sudo bash /opt/macd-monitor/macd-monitor/install_retrain.sh`
 
 ## 配置说明（config.json）
 
@@ -298,22 +315,35 @@ systemctl restart macd-monitor              # 重启监控
 ├── install.bat           # Windows 一键安装（cmd / 双击运行）
 ├── uninstall.sh          # Linux 一键卸载（终止进程/移除服务/删除目录）
 ├── uninstall.ps1         # Windows 一键卸载（PowerShell）
-├── deploy.sh             # VPS 服务器部署（systemd 开机自启）
+├── deploy.sh             # VPS 服务器部署（systemd 开机自启 + 模型每日重训）
 ├── docs/
 │   └── screenshots/       # README 界面截图（实际部署抓取）
 └── macd-monitor/
     ├── monitor.py            # MACD 监控 + 飞书推送
     ├── webui.py              # 自选管理 Web UI 后端
-    ├── config.json           # 运行配置（自选股、webhook）
+    ├── db.py                 # SQLite 存储层（信号库 + 跟踪收益）
+    ├── net.py                # 行情网络层（限流/熔断/双源容灾）
+    ├── obs.py                # 可观测性（事件总线/健康快照）
+    ├── zt.py                 # 涨停池数据层（东财涨停/炸板/跌停 + 情绪温度）
+    ├── model.py              # 信号质量模型（元标签特征/三重障碍标签/纯Python打分）
+    ├── train_model.py        # 模型训练（回填收益→数据集→walk-forward→保存 model.json）
+    ├── backfill_ml.py        # 模型重训后为库内存量信号刷新模型分
+    ├── retrain_daily.py      # 交易日早6点自动重训（周末/节假日跳过）
+    ├── install_retrain.sh    # 存量部署单独补装重训 systemd timer
     ├── config.example.json   # 配置示例
-    ├── state.json            # 信号去重状态
-    ├── etf_share_hist.json   # ETF 份额日度快照（自动积累）
-    ├── kline_cache.json      # 指数/宽基ETF 日K周K本地缓存（增量更新）
-    ├── monitor.log           # 运行日志
     └── static/               # 前端静态文件
-        ├── index.html
-        ├── app.js
-        └── style.css
+        ├── index.html / app.js / chart.js / style.css
+        └── sw.js             # PWA Service Worker
+
+# 以下均为运行时自动生成（已 gitignore，更新代码不会删除）：
+#   config.json            运行配置（自选股、webhook）
+#   data.db                信号库 + 收益跟踪（保留2年）
+#   model.json             模型权重（每日重训自动更新）
+#   dataset.json           训练数据集缓存
+#   state.json             信号去重状态
+#   etf_share_hist.json    ETF 份额日度快照（自动积累）
+#   kline_cache.json       指数/宽基ETF 日K周K本地缓存（增量更新）
+#   monitor.log / retrain.log   运行日志 / 重训日志
 ```
 
 ## 说明
