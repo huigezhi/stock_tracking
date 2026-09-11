@@ -690,6 +690,22 @@ async function delStock(code) {
   if (res.ok) { loadWatch(); loadDivs(); }
 }
 
+/* 中栏"＋自选": 将当前查看的标的加入右侧监控列表(默认分组) */
+async function addCurToWatch() {
+  if (!curEtf) { toast('请先选择标的'); return; }
+  const name = document.getElementById('chName').textContent.trim();
+  if (!name) { toast('请先选择标的'); return; }
+  if (watchData.some(s => s.code === curEtf)) { toast(`${name} 已在监控列表中`); return; }
+  const r = await apiFetch('/api/stocks', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: curEtf, name, group: '自选'})
+  });
+  const res = await r.json();
+  toast(res.ok ? `已添加 ${name} → 自选` : res.msg || '添加失败');
+  if (res.ok) { loadWatch(); loadDivs(); }
+}
+
 /* ================= 系统面板(健康+日志) ================= */
 let sysTimer = null;
 let logLvl = '';
