@@ -564,10 +564,16 @@ function renderWatchList() {
   }
   box.innerHTML = watchData.map(watchItemHtml).join('');   // 全量渲染一次以测量行高
   if (!box.clientHeight) { pgEl.innerHTML = ''; return; }   // 图表视图隐藏中, 显示后再分页
+  // 先补齐徽章再测高(带徽章的行更高), 否则分页按矮行计算, 徽章渲染后溢出裁掉末行
+  updateIntradayBadges();
+  updateResBadges();
   if (!watchPage.size) {
-    const item = box.querySelector('.watch-item');
-    if (item) watchPage.size =
-      Math.max(1, Math.floor((box.clientHeight + 6) / (item.offsetHeight + 6)));
+    let rowH = 0;
+    box.querySelectorAll('.watch-item').forEach(el => {
+      rowH = Math.max(rowH, el.offsetHeight);
+    });
+    if (rowH) watchPage.size =
+      Math.max(1, Math.floor((box.clientHeight + 6) / (rowH + 6)));
   }
   const pages = Math.max(1, Math.ceil(watchData.length / watchPage.size));
   watchPage.n = Math.min(Math.max(1, watchPage.n), pages);
@@ -737,11 +743,17 @@ function updateChartHeader(q) {
 }
 
 /* ================= 盘中背离预览徽章 ================= */
+/* 徽章增删会改变行高: 重置每页条数并重渲染, 避免末行被固定高度裁切 */
+function repaginateWatch() {
+  watchPage.size = 0;
+  renderWatchList();
+}
+
 function setIntraday(rows) {
   const prevKeys = Object.keys(intradayMap);
   intradayMap = {};
   rows.forEach(r => { intradayMap[r.code] = r; });
-  updateIntradayBadges();
+  if (updateIntradayBadges()) repaginateWatch();
   const fresh = Object.keys(intradayMap).filter(k => !prevKeys.includes(k));
   if (fresh.length) {
     const names = fresh.slice(0, 3).map(k => intradayMap[k].name).join('、');
@@ -754,11 +766,12 @@ async function loadIntraday() {
     const r = await apiFetch('/api/intraday');
     const d = await r.json();
     (d.rows || []).forEach(x => { intradayMap[x.code] = x; });
-    updateIntradayBadges();
+    if (updateIntradayBadges()) repaginateWatch();
   } catch (e) { /* 下轮重试 */ }
 }
 
 function updateIntradayBadges() {
+  let changed = false;
   document.querySelectorAll('.watch-item').forEach(el => {
     const r = intradayMap[el.dataset.code];
     let b = el.querySelector('.intraday-badge');
@@ -768,13 +781,16 @@ function updateIntradayBadges() {
         b.className = 'intraday-badge';
         b.textContent = '60分背离';
         el.querySelector('.wname').appendChild(b);
+        changed = true;
       }
       b.title = `60分钟底背离预览: 价格${r.price1.toFixed(2)}→${r.price2.toFixed(2)} ` +
         `DIF ${r.dif1}→${r.dif2}(未收盘确认)`;
     } else if (b) {
       b.remove();
+      changed = true;
     }
   });
+  return changed;
 }
 
 /* ================= 多周期共振徽章(60分/日/周) ================= */
@@ -785,7 +801,7 @@ function setResonance(rows) {
   const prevKeys = Object.keys(resMap);
   resMap = {};
   rows.forEach(r => { resMap[r.code] = r; });
-  updateResBadges();
+  if (updateResBadges()) repaginateWatch();
   const fresh = Object.keys(resMap).filter(k => !prevKeys.includes(k));
   if (fresh.length) {
     const names = fresh.slice(0, 3).map(k => `${resMap[k].name}(${resMap[k].tfs.map(t => TF_CN[t]).join('+')})`).join('、');
@@ -802,6 +818,7 @@ async function loadResonance() {
 }
 
 function updateResBadges() {
+  let changed = false;
   document.querySelectorAll('.watch-item').forEach(el => {
     const r = resMap[el.dataset.code];
     let b = el.querySelector('.res-badge');
@@ -810,6 +827,7 @@ function updateResBadges() {
         b = document.createElement('span');
         b.className = 'res-badge';
         el.querySelector('.wname').appendChild(b);
+        changed = true;
       }
       b.textContent = `${r.dir === 'bull' ? '↑' : '↓'}${r.tfs.length}周期共振`;
       b.classList.toggle('up', r.dir === 'bull');
@@ -818,8 +836,10 @@ function updateResBadges() {
         `${TF_CN[x.tf] || x.tf} ${x.word}(${x.ago}根K线前, ${x.label})`).join('\n');
     } else if (b) {
       b.remove();
+      changed = true;
     }
   });
+  return changed;
 }
 
 /* ================= 搜索 ================= */
