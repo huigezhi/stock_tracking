@@ -27,6 +27,7 @@ from monitor import (bar_complete, combine_resonance, detect_divergences,
                      recent_tf_signals, send_feishu_text)
 from monitor import macd as calc_macd
 import db
+import macro
 import model as ml_model
 import net
 import obs
@@ -1917,6 +1918,17 @@ class Handler(BaseHTTPRequestHandler):
             # 多周期共振快照(60分/日/周, 前端初始加载; 之后走SSE)
             with RESONANCE_LOCK:
                 self._json({"rows": list(RESONANCE_ROWS), "ts": RESONANCE_TS})
+        elif u.path == "/api/macro/overview":
+            # 宏观通胀: 顶部指标卡片(6张) + 10Y-2Y利差摘要
+            self._json(macro.serve_overview())
+        elif u.path == "/api/macro/series":
+            # 宏观通胀: 趋势折线 ?metrics=cn_cpi,us_cpi&range=1y|3y|5y|10y|all
+            q = parse_qs(u.query)
+            metrics = (q.get("metrics") or q.get("metric") or [""])[0]
+            self._json(macro.serve_series(metrics, q.get("range", ["5y"])[0]))
+        elif u.path == "/api/macro/yields":
+            # 宏观通胀: 美债收益率曲线(当前+1年/3年前叠加+利差)
+            self._json(macro.serve_yields())
         elif u.path == "/api/logs":
             # 结构化日志: obs 进程内事件缓冲(新的在前), 支持级别过滤
             q = parse_qs(u.query)
@@ -2112,6 +2124,18 @@ def _rescan_today():
           if removed else f"{today} 尚无当日新扫信号, 启动后将直接全量扫描")
 
 
+def _macro_loop():
+    """宏观数据后台更新: 启动先做首次全量(冷启动秒开缓存), 之后每30分钟按更新策略
+    增量刷新(通胀每个交易日收盘后一次, 美债每日一次, 当日已刷过/无新数据自动跳过)"""
+    time.sleep(8)
+    while True:
+        try:
+            macro.daily_update()
+        except Exception as e:
+            obs.record("ERROR", "macro", f"宏观数据更新线程异常: {e}")
+        time.sleep(1800)
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="MACD 监控自选管理 Web UI")
@@ -2139,6 +2163,7 @@ def main():
     threading.Thread(target=_zt_scanner, daemon=True).start()  # 每日15:20涨停池扫描(短线策略数据源)
     threading.Thread(target=_pick_track_loop, daemon=True).start()  # 每日17:30选股成绩回填
     threading.Thread(target=_intraday_scanner, daemon=True).start()  # 盘中60分钟背离预览
+    threading.Thread(target=_macro_loop, daemon=True).start()  # 宏观数据每日增量更新(通胀+美债)
     print(f"自选管理 Web UI 已启动: http://{'localhost' if host in ('127.0.0.1', 'localhost') else host}:{port} (绑定 {host})")
     srv.serve_forever()
 

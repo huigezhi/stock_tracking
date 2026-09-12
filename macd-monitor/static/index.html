@@ -42,6 +42,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M11 4l1.6 4L16.5 9.6 12.6 11.2 11 15.2 9.4 11.2 5.5 9.6 9.4 8z"/><path d="M18.5 13.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
         <span>AI 选股</span>
       </a>
+      <a class="nav-item" data-view="macro" onclick="showView('macro')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 2.6 4 5.6 4 9s-1.2 6.4-4 9c-2.8-2.6-4-5.6-4-9s1.2-6.4 4-9z"/></svg>
+        <span>宏观通胀</span>
+      </a>
       <a class="nav-item" data-view="sys" onclick="showView('sys')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12.5 14H17"/></svg>
         <span>系统状态</span>
@@ -271,6 +275,101 @@
         </div>
       </section>
 
+      <!-- ===== 视图: 宏观通胀 ===== -->
+      <section class="view" id="view-macro">
+        <header class="view-head">
+          <div>
+            <h2>宏观通胀</h2>
+            <p class="vh-sub">中美 CPI / 核心 CPI / PPI 月度同比 · 美债收益率曲线 · 10Y-2Y 利差倒挂预警，为交易决策提供宏观背景</p>
+          </div>
+          <div class="vh-meta mono" id="macroMeta"></div>
+        </header>
+
+        <!-- 顶部指标卡片: 点击切换到对应趋势 -->
+        <div class="macro-cards" id="macroCards"></div>
+
+        <!-- 通胀趋势折线图 -->
+        <div class="panel macro-sec">
+          <div class="macro-toolbar">
+            <div class="macro-chips" id="macroChips"></div>
+            <div class="tf-tabs macro-range" id="macroRange">
+              <button class="tf" data-r="1y" onclick="MacroView.setRange('1y')">1年</button>
+              <button class="tf" data-r="3y" onclick="MacroView.setRange('3y')">3年</button>
+              <button class="tf active" data-r="5y" onclick="MacroView.setRange('5y')">5年</button>
+              <button class="tf" data-r="10y" onclick="MacroView.setRange('10y')">10年</button>
+              <button class="tf" data-r="all" onclick="MacroView.setRange('all')">全部</button>
+            </div>
+          </div>
+          <div class="macro-chart-body" id="macroChartBody">
+            <canvas id="macroChart"></canvas>
+            <div class="chart-tip" id="macroTip"></div>
+          </div>
+        </div>
+
+        <!-- 美债收益率曲线 -->
+        <div class="panel macro-sec">
+          <div class="macro-toolbar wrap">
+            <div class="macro-yhead">
+              <h3>美债收益率曲线 <small id="yieldDate"></small></h3>
+            </div>
+            <div class="macro-yctl">
+              <div class="tf-tabs">
+                <button class="tf active" id="ymYield" onclick="MacroView.setYieldMode('yield')">实际收益率</button>
+                <button class="tf" id="ymSpread" onclick="MacroView.setYieldMode('spread')">相对10Y利差</button>
+              </div>
+              <label class="macro-hopt"><input type="checkbox" id="hist1y" onchange="MacroView.drawYields()">1年前</label>
+              <label class="macro-hopt"><input type="checkbox" id="hist3y" onchange="MacroView.drawYields()">3年前</label>
+            </div>
+          </div>
+          <div class="macro-chart-body yield" id="yieldChartBody">
+            <canvas id="yieldChart"></canvas>
+            <div class="chart-tip" id="yieldTip"></div>
+          </div>
+          <div class="macro-spread">
+            <div class="macro-spread-head">
+              <span class="macro-spread-t">10Y − 2Y 利差 <small>近3年 · 灰带为倒挂区间</small></span>
+              <span class="macro-spread-v mono" id="spreadVal">--</span>
+              <span class="macro-inv" id="spreadInv"></span>
+            </div>
+            <div class="macro-spread-body" id="spreadBody"><canvas id="spreadChart"></canvas></div>
+          </div>
+        </div>
+
+        <!-- 数据明细表 -->
+        <div class="panel macro-sec">
+          <div class="div-filters">
+            <select id="macroFCountry" onchange="MacroView.renderTable()" title="按国家筛选">
+              <option value="">全部国家</option>
+              <option value="中国">中国</option>
+              <option value="美国">美国</option>
+            </select>
+            <select id="macroFGroup" onchange="MacroView.renderTable()" title="按类别筛选">
+              <option value="">全部类别</option>
+              <option value="通胀指标">通胀指标</option>
+              <option value="美债收益率">美债收益率</option>
+            </select>
+            <input id="macroQ" placeholder="筛选指标 / 期限（如 CPI / 10Y）" oninput="MacroView.renderTable()">
+            <span class="div-count" id="macroCount"></span>
+          </div>
+          <div class="div-table-wrap">
+            <table class="div-table">
+              <thead><tr>
+                <th>国家</th>
+                <th>类别</th>
+                <th class="sortable" id="mSortName" onclick="MacroView.toggleSort('name')">指标 / 期限<span class="si"></span></th>
+                <th class="sortable" id="mSortValue" onclick="MacroView.toggleSort('value')">最新值<span class="si"></span></th>
+                <th class="sortable" id="mSortChg" onclick="MacroView.toggleSort('chg')">环比变动<span class="si"></span></th>
+                <th class="sortable" id="mSortDate" onclick="MacroView.toggleSort('date')">数据期<span class="si"></span></th>
+                <th>发布日期</th>
+              </tr></thead>
+              <tbody id="macroBody">
+                <tr><td colspan="7" class="empty">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== 视图: 系统状态 ===== -->
       <section class="view" id="view-sys">
         <header class="view-head">
@@ -319,6 +418,7 @@
   </div>
 </div>
 <script src="/static/chart.js"></script>
+<script src="/static/macro.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

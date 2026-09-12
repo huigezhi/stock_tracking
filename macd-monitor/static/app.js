@@ -88,6 +88,8 @@ function applyTheme(mode) {
   document.body.classList.toggle('dark', dark);
   if (window.__kchartReady) KChart.draw();  // KChart 定义前(初始化阶段)不绘制
   if (window.__kchartReady && window.ShareChart) ShareChart.draw();
+  if (window.MacroView && document.getElementById('view-macro') &&
+      document.getElementById('view-macro').classList.contains('active')) MacroView.redrawAll();
 }
 function setTheme(mode) {
   localStorage.setItem('theme', mode);
@@ -105,7 +107,7 @@ function setTheme(mode) {
 
 /* ================= 视图路由(侧边栏导航) ================= */
 let curView = '';
-const VIEWS = ['overview', 'chart', 'div', 'ai', 'sys'];
+const VIEWS = ['overview', 'chart', 'div', 'ai', 'macro', 'sys'];
 
 function showView(viewId) {
   if (!VIEWS.includes(viewId)) viewId = 'overview';
@@ -129,6 +131,8 @@ function showView(viewId) {
     });
   } else if (viewId === 'ai') {
     startAiView();
+  } else if (viewId === 'macro') {
+    if (window.MacroView) MacroView.enter();
   } else if (viewId === 'sys') {
     startSysView();
   }
