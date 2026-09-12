@@ -859,12 +859,22 @@ function updateResBadges() {
 
 /* ================= 搜索 ================= */
 async function doSearch() {
-  const q = document.getElementById('q').value.trim();
-  if (!q) return;
+  const inp = document.getElementById('q');
+  const q = inp.value.trim();
   const box = document.getElementById('results');
+  if (!q) {                          // 空输入 → 清空并收起结果区
+    box.innerHTML = '';
+    box.style.display = 'none';      // 同时消除 margin-top:10px 的残留空隙
+    renderWatchList();               // 列表可用高度变大, 重算分页对齐
+    return;
+  }
+  const myQ = q;                     // 捕获本次关键词, 用于丢弃过期响应
+  box.style.display = '';            // 有词时恢复显示
   box.innerHTML = '<div class="empty">搜索中…</div>';
   const r = await apiFetch('/api/search?q=' + encodeURIComponent(q));
   const items = await r.json();
+  // 响应回来时输入框已变 → 本次结果作废(快速连续输入/清空时的竞态防护)
+  if (inp.value.trim() !== myQ) return;
   if (!items.length) {
     box.innerHTML = '<div class="empty">未找到相关标的</div>';
     return;
