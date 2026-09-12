@@ -459,6 +459,81 @@ body.dark .tag.zs { background: #3d331a; }
             font-variant-numeric: tabular-nums; text-align: right; }
 .ai-stats b { color: var(--text); font-weight: 600; }
 
+/* ============ 宏观通胀视图 ============ */
+.macro-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+               gap: 10px; padding: 0 22px; }
+.mc-card { position: relative; background: var(--card); border: 1px solid var(--line);
+           border-radius: 10px; padding: 12px 14px 10px; cursor: pointer;
+           overflow: hidden; box-shadow: var(--shadow);
+           transition: transform .16s, border-color .16s;
+           animation: cardIn .38s cubic-bezier(.2, .7, .3, 1) both; }
+.mc-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0;
+                   height: 3px; background: var(--muted); opacity: .3; }
+.mc-card[data-country="中国"]::before { background: var(--up); opacity: 1; }
+.mc-card[data-country="美国"]::before { background: #3b82f6; opacity: 1; }
+.mc-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.mc-card.miss { border-style: dashed; cursor: default; }
+.mc-card.miss:hover { transform: none; border-color: var(--line); }
+.mc-card:nth-child(2) { animation-delay: .04s; } .mc-card:nth-child(3) { animation-delay: .08s; }
+.mc-card:nth-child(4) { animation-delay: .12s; } .mc-card:nth-child(5) { animation-delay: .16s; }
+.mc-card:nth-child(6) { animation-delay: .2s; }
+.mc-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mc-country { flex: none; font-size: 10px; line-height: 15px; padding: 0 5px;
+              border-radius: 3px; color: #fff; background: var(--muted); }
+.mc-card[data-country="中国"] .mc-country { background: var(--up); }
+.mc-card[data-country="美国"] .mc-country { background: #3b82f6; }
+.mc-name { font-size: 12px; color: var(--muted); font-weight: 600;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-val { font-size: 22px; font-weight: 700; margin-top: 3px;
+          font-variant-numeric: tabular-nums; }
+.mc-val i { font-style: normal; font-size: 12px; color: var(--muted); margin-left: 1px; }
+.mc-foot { display: flex; align-items: baseline; justify-content: space-between;
+           margin-top: 2px; gap: 6px; }
+.mc-chg { font-family: var(--mono); font-size: 12px; font-weight: 700;
+          font-variant-numeric: tabular-nums; }
+.mc-date { font-size: 10.5px; color: var(--muted); font-family: var(--mono); flex: none; }
+.mc-pub { font-size: 10px; color: var(--muted); margin-top: 3px;
+          border-top: 1px dashed var(--grid); padding-top: 3px; }
+
+.macro-sec { margin: 10px 22px 0; padding: 12px 16px 14px; }
+.macro-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                 margin-bottom: 8px; min-width: 0; }
+.macro-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; flex: 1; }
+.m-chip { border: 1px solid var(--line); background: var(--hover); color: var(--muted);
+          font-size: 11.5px; padding: 3.5px 11px; border-radius: 12px; cursor: pointer;
+          white-space: nowrap; transition: color .15s, background .15s, border-color .15s; }
+.m-chip:hover { color: var(--text); border-color: var(--accent); }
+.m-chip.on { background: var(--accent); border-color: var(--accent); color: #fff;
+             font-weight: 600; }
+.m-chip.miss { border-style: dashed; opacity: .6; }
+.macro-range { margin-left: auto; flex: none; }
+.macro-chart-body { position: relative; height: 380px; }
+.macro-chart-body.yield { height: 340px; }
+#macroChart, #yieldChart, #spreadChart { width: 100%; height: 100%; display: block;
+                                         cursor: crosshair; }
+.macro-yhead { min-width: 0; }
+.macro-yhead h3 { font-size: 13.5px; white-space: nowrap; }
+.macro-yhead h3 small { color: var(--muted); font-weight: 400; font-size: 11px;
+                        margin-left: 6px; font-family: var(--mono); }
+.macro-yctl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.macro-yctl .tf-tabs { margin-left: 0; }
+.macro-hopt { display: flex; align-items: center; gap: 5px; font-size: 11.5px;
+              color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+.macro-hopt:hover { color: var(--text); }
+.macro-hopt input { accent-color: var(--accent); cursor: pointer; }
+.macro-spread { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
+.macro-spread-body { position: relative; height: 120px; }
+.macro-spread-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;
+                     flex-wrap: wrap; }
+.macro-spread-t { font-size: 13px; font-weight: 600; }
+.macro-spread-t small { color: var(--muted); font-weight: 400; font-size: 11px;
+                        margin-left: 6px; }
+.macro-spread-v { margin-left: auto; font-size: 14px; font-weight: 700; }
+.macro-inv { font-size: 10.5px; line-height: 17px; padding: 0 8px; border-radius: 9px;
+             background: var(--line); color: var(--muted); white-space: nowrap; }
+.macro-inv.inv { background: rgba(208,58,47,.14); color: var(--up);
+                 font-weight: 700; }
+
 /* ============ 系统状态页 ============ */
 .sys-page { margin: 0 14px; padding: 14px 18px 16px; }
 .sys-health { padding: 0 2px; }
@@ -589,12 +664,21 @@ body.dark .tag.zs { background: #3d331a; }
   .ov-cards { padding: 0 12px; }
   .ov-ai { margin: 10px 12px 0; }
   .div-panel, .ai-page, .sys-page { margin: 0 10px; }
+  /* 窄屏: 宏观视图 */
+  .macro-cards { padding: 0 12px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .macro-sec { margin: 10px 12px 0; padding: 10px 12px 12px; }
+  .macro-range { margin-left: 0; }
+  .macro-chart-body { height: 300px; }
+  .macro-chart-body.yield { height: 280px; }
+  .macro-spread-body { height: 96px; }
+  .mc-val { font-size: 19px; }
+  .div-table-wrap { max-height: 60vh; }
   .view-head { padding: 14px 14px 10px; }
   .vh-actions .stats-btn { margin-right: 4px; padding: 4px 8px; }
   .ai-picks .ai-table { max-height: 60vh; }
 }
 /* 减少动效偏好 */
 @media (prefers-reduced-motion: reduce) {
-  .view.active, .ov-idx { animation: none; }
-  .nav-item, .ov-idx { transition: none; }
+  .view.active, .ov-idx, .mc-card { animation: none; }
+  .nav-item, .ov-idx, .mc-card { transition: none; }
 }
