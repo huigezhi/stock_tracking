@@ -325,8 +325,13 @@ body.dark .tag.zs { background: #3d331a; }
 .qflow .v { white-space: nowrap; }
 .qflow .l { font-size: 10px; color: var(--muted); display: block; white-space: nowrap; }
 .del { background: transparent; color: var(--accent); padding: 4px 12px;
-       border: 1px solid var(--line); }
+       border: 1px solid var(--line); flex: none; white-space: nowrap; }
 .del:hover { border-color: var(--accent); }
+/* 中屏(1381-1599px): 右栏列宽上限384px, 行内容约326px放不下全部固定列,
+   隐藏分组/资金流列, 否则溢出会压扁"删除"按钮(文字被裁或换行) */
+@media (min-width: 1381px) and (max-width: 1599px) {
+  .watch-item .grp, .watch-item .qflow { display: none; }
+}
 /* 盘中60分钟背离预览徽章 */
 .intraday-badge { display: inline-block; margin-left: 5px; padding: 0 5px;
                   border-radius: 3px; font-size: 10px; line-height: 15px;
