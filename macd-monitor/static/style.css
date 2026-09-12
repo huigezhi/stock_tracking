@@ -298,7 +298,7 @@ body.dark .tag.zs { background: #3d331a; }
 .watch-title { font-size: 13px; margin: 16px 0 10px; color: var(--muted);
                font-weight: 600; }
 .watch-title .upd { float: right; font-weight: 400; font-size: 11px; }
-#watch { display: grid; grid-template-columns: 1fr; gap: 6px;
+#watch { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px;
          height: calc(100vh - 380px); overflow: hidden; align-content: start; }
 .watch-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
         border: 1px solid var(--line); border-radius: 8px; background: var(--hover);
