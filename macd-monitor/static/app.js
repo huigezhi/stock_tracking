@@ -374,7 +374,8 @@ function alignColumns() {
   const cs = getComputedStyle(watch.closest('.monitor-panel'));
   const pagerH = document.getElementById('watchPager').offsetHeight || 32;
   const h = bottom - top - (parseFloat(cs.paddingBottom) || 0) - pagerH - 1;
-  if (h >= 120) watch.style.height = h + 'px';   // 窄屏堆叠布局下 h 为负, 走CSS默认高度
+  // h<120 视为堆叠布局: 清除内联高度回落到CSS默认, 避免残留宽屏时的旧高度
+  watch.style.height = h >= 120 ? h + 'px' : '';
 }
 
 function renderPager(el, pg, pages) {
@@ -567,14 +568,14 @@ function renderWatchList() {
   // 先补齐徽章再测高(带徽章的行更高), 否则分页按矮行计算, 徽章渲染后溢出裁掉末行
   updateIntradayBadges();
   updateResBadges();
-  if (!watchPage.size) {
-    let rowH = 0;
-    box.querySelectorAll('.watch-item').forEach(el => {
-      rowH = Math.max(rowH, el.offsetHeight);
-    });
-    if (rowH) watchPage.size =
-      Math.max(1, Math.floor((box.clientHeight + 6) / (rowH + 6)));
-  }
+  // 每次都按当前几何重算每页条数: 上方搜索结果框展开/收起会改变列表可用高度,
+  // 若沿用旧size会导致当页行数超出高度, 末行被 overflow:hidden 裁掉(删除按钮显示不完全)
+  let rowH = 0;
+  box.querySelectorAll('.watch-item').forEach(el => {
+    rowH = Math.max(rowH, el.offsetHeight);
+  });
+  if (rowH) watchPage.size =
+    Math.max(1, Math.floor((box.clientHeight + 6) / (rowH + 6)));
   const pages = Math.max(1, Math.ceil(watchData.length / watchPage.size));
   watchPage.n = Math.min(Math.max(1, watchPage.n), pages);
   const start = (watchPage.n - 1) * watchPage.size;
