@@ -14,7 +14,9 @@ import json
 import os
 import sys
 import time
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -131,22 +133,61 @@ def phase2_dataset():
     return rows
 
 
+def _uniqueness_weights(rows, span_bars=10, bar_days=1.5):
+    """同(code,tf)相邻信号的障碍窗口重叠度 -> 权重(独立样本=1.0, 全重叠≈0.4)
+
+    元标签样本天然高度重叠(同一只股票在相邻确认日产生的信号, 标签窗口彼此
+    覆盖), 用唯一性权重降低重叠样本在损失函数中的占比(López de Prado 2018)。
+    """
+    win = timedelta(days=int(span_bars * bar_days))
+    w = [1.0] * len(rows)
+    by = defaultdict(list)
+    for i, r in enumerate(rows):
+        by[(r["code"], r["tf"])].append(i)
+    for idxs in by.values():
+        idxs.sort(key=lambda i: rows[i]["confirm"])
+        ts = [datetime.fromisoformat(rows[i]["confirm"]) for i in idxs]
+        for j in range(len(idxs)):
+            lo = bisect_left(ts, ts[j] - win)
+            hi = bisect_right(ts, ts[j] + win)
+            w[idxs[j]] = 1.0 / (1.0 + 0.5 * (hi - lo - 1))
+    return np.array(w)
+
+
 def phase3_walk_forward(rows):
-    """Walk-forward评估: 按确认日时间排序, 4个扩张式折, 每折用过去训练预测未来"""
+    """Walk-forward评估: 按确认日日期分组切分(同日样本不跨折), 4个扩张式折,
+    每折用过去训练预测未来; 训练集裁掉标签窗口伸入测试期的样本(purge);
+    fit 使用唯一性权重降低重叠样本占比"""
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score
     rows = sorted(rows, key=lambda r: r["confirm"])
     X = np.array([expand_features(r) for r in rows], dtype=float)
     y = np.array([r["label"] for r in rows], dtype=int)
+    confirms = np.array([r["confirm"] for r in rows])
+    uniq = _uniqueness_weights(rows)
     n = len(rows)
     log(f"\n[阶段3] walk-forward: {n} 样本, 基线胜率 {y.mean()*100:.1f}%")
+    log(f"唯一性权重均值 {uniq.mean():.3f}, "
+        f"<0.5 占比 {(uniq < 0.5).mean()*100:.1f}%")
+    # 按确认日日期切分: 同一交易日的所有样本落同一折(防同日信息跨折泄漏)
+    dates = sorted(set(confirms))
     folds = 4
-    edges = [int(n * (i + 1) / (folds + 1)) for i in range(folds)]
+    if len(dates) <= folds:
+        log("  日期数不足, 无法按日期分组切分")
+        return {"auc": None, "n": 0, "base_win": None, "buckets": []}
+    date_edges = [dates[int(len(dates) * (i + 1) / (folds + 1)) - 1]
+                  for i in range(folds)]
     all_pred, all_true = [], []
-    for fi, e in enumerate(edges, 1):
-        test_end = edges[fi] if fi < folds else n
-        Xtr, ytr = X[:e], y[:e]
-        Xte, yte = X[e:test_end], y[e:test_end]
+    for fi, edge in enumerate(date_edges, 1):
+        te_end = date_edges[fi] if fi < folds else dates[-1]
+        te = (confirms > edge) & (confirms <= te_end)
+        # purge: 训练集裁掉标签窗口(10根K线≈15自然日)伸入测试期的样本
+        cutoff = (datetime.fromisoformat(edge)
+                  - timedelta(days=15)).isoformat()
+        tr = confirms <= cutoff
+        Xtr, ytr = X[tr], y[tr]
+        wtr = uniq[tr]
+        Xte, yte = X[te], y[te]
         if len(yte) == 0 or len(np.unique(ytr)) < 2:
             continue
         # 缩尾边界只用训练折数据计算(无泄漏)
@@ -156,11 +197,14 @@ def phase3_walk_forward(rows):
         mean, std = Xtr.mean(axis=0), Xtr.std(axis=0)
         std = np.where(std > 1e-12, std, 1.0)
         clf = LogisticRegression(max_iter=3000, C=0.5, class_weight="balanced")
-        clf.fit((Xtr - mean) / std, ytr)
+        clf.fit((Xtr - mean) / std, ytr, sample_weight=wtr)
         p = clf.predict_proba((Xte - mean) / std)[:, 1]
         all_pred.extend(p)
         all_true.extend(yte)
     all_pred, all_true = np.array(all_pred), np.array(all_true)
+    if len(all_true) == 0 or len(np.unique(all_true)) < 2:
+        log("  有效折不足, 无法计算样本外AUC")
+        return {"auc": None, "n": 0, "base_win": None, "buckets": []}
     auc = roc_auc_score(all_true, all_pred)
     log(f"  样本外 AUC: {auc:.3f}  (样本 {len(all_true)})")
     # 按模型分分桶看胜率提升
