@@ -15,7 +15,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -670,6 +670,46 @@ def fetch_kline(code, tf="day", n=800):
     return _sina_kline(code, tf, n)
 
 
+# ---------------- 全市场扫描K线日级缓存(SQLite) ----------------
+# 每标的每周期每日最多一次网络拉取, 其余走SQLite; 超过7天强制重新全量
+# 拉取一次修正前复权漂移; 缓存只存收盘定型K线(盘中手动扫描不写缓存)
+
+_KSCAN_FULL_SEC = 7 * 86400
+
+
+def fetch_kline_scan(code, tf="day", n=800):
+    """全市场扫描专用K线获取(带SQLite日级缓存)。
+    缓存最新K线已达最近收盘交易日(以上证指数最新K线为准)且距上次全量
+    刷新不足7天时直接读库; 否则网络拉取, 剔除未收盘K线后写库缓存。"""
+    now = now_cst()
+    try:
+        cached = db.kscan_load(code, tf, n)
+        if cached:
+            # 新鲜度基准: 指数最新K线日期(含盘中当根) -> 缓存落后即需要网络增量
+            try:
+                latest = (_index_bars() or [None])[-1][0] or now.strftime("%Y-%m-%d")
+            except Exception:
+                latest = now.strftime("%Y-%m-%d")
+            if db.kscan_last(code, tf) >= latest:
+                if time.time() - db.kscan_full_ts(code, tf) < _KSCAN_FULL_SEC:
+                    return cached
+    except Exception:
+        cached = None   # 缓存读失败(锁/损坏等)直接走网络
+    fresh = fetch_kline(code, tf, n)
+    if fresh and len(fresh) > 60:
+        # 只缓存已收盘定型K线(剔除盘中未收盘当根, 防半根K线污染缓存)
+        bars = list(fresh)
+        while bars and not bar_complete(tf, bars[-1][0], now):
+            bars.pop()
+        if len(bars) > 60:
+            try:
+                db.kscan_save(code, tf, bars)
+            except Exception:
+                pass
+        return fresh
+    return cached or fresh
+
+
 # ---------------- 左栏指数/宽基ETF K线本地缓存 ----------------
 # 历史K线持久化到 kline_cache.json(VPS本地), 增量只补最新交易日的数据, 加快加载;
 # 只更新到最新交易日收盘价, 周末等缓存已含最近交易日时不发起任何网络请求
@@ -850,6 +890,39 @@ def get_kline_cached(code, tf="day", n=800):
     if not _kline_stale(entry, bars, now_c, now_ts):
         return bars[-n:]
     return _refresh_kline(code, tf)[-n:]
+
+
+# ---------------- ctx 数据源(元标签模型上下文特征) ----------------
+# 指数K线/当日情绪每日拉取一次(全市场扫描数千次调用共用), 失败容忍旧数据
+
+_IDX_KL = {"date": "", "bars": None}
+
+
+def _index_bars():
+    """上证指数日K(带本地缓存容灾), 按天刷新一次"""
+    today = now_cst().strftime("%Y-%m-%d")
+    if _IDX_KL["bars"] is None or _IDX_KL["date"] != today:
+        try:
+            _IDX_KL["bars"] = get_kline_cached("sh000001", "day", 800)
+        except Exception:
+            _IDX_KL["bars"] = None
+        _IDX_KL["date"] = today
+    return _IDX_KL["bars"]
+
+
+_MOOD_TODAY = {"date": "", "mood": None}
+
+
+def _today_mood():
+    """当日市场情绪快照(zt_mood, 15:20后入库; 无数据返回None走中性填充)"""
+    d = now_cst().strftime("%Y-%m-%d")
+    if _MOOD_TODAY["date"] != d:
+        try:
+            _MOOD_TODAY["mood"] = db.zt_mood_of(d)
+        except Exception:
+            _MOOD_TODAY["mood"] = None
+        _MOOD_TODAY["date"] = d
+    return _MOOD_TODAY["mood"]
 
 
 def _kline_prewarm():
@@ -1096,7 +1169,7 @@ def _scan_one_divs(stock, now):
     rows = []
     for tf, tf_name in (("day", "日线"),):
         try:
-            klines = fetch_kline(code, tf, DIV_KLINE_N)
+            klines = fetch_kline_scan(code, tf, DIV_KLINE_N)
         except Exception:
             continue
         if len(klines) < 160:   # 100周期窗口 + EMA预热下限
@@ -1122,7 +1195,9 @@ def _scan_one_divs(stock, now):
 
             # 共振标签与加权分(纯本地计算)
             tags, score = _resonance(klines[:last + 1], closes, d["p1"], p2, cidx, tf)
-            # 元标签模型质量分(只用确认日及之前数据, 无未来函数)
+            # 元标签模型质量分(只用确认日及之前数据, 无未来函数);
+            # ctx: 指数严格对齐 + 当日情绪中性填充, 全市场扫描逐股查行业
+            # 动量过重, 线上置0(训练侧保留完整 ind_mom)
             ml_score = None
             feats = ml_model.build_features(klines[:last + 1], {
                 "date1": bars[d["p1"]][0], "date2": bars[d["p2"]][0],
@@ -1130,7 +1205,8 @@ def _scan_one_divs(stock, now):
                 "dif1": d["d1"], "dif2": d["d2"],
                 "score": score, "tags": ",".join(tags),
                 "confirm": bars[cidx][0], "confirm_close": closes[cidx],
-            })
+            }, ctx={"idx": _index_bars(), "mood": _today_mood(),
+                    "ind_mom": 0.0})
             if feats is not None:
                 ml_score = ml_model.model_score(feats)
             rows.append({
@@ -1178,6 +1254,7 @@ def _run_full_scan(scan_date):
     """全市场底背离扫描主体(16:00定时与前端"立即更新"手动触发共用), 返回是否成功"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     now = now_cst()
+    t0 = time.time()
     with DIV_LOCK:
         DIV_SCAN.update(scanning=True, done=0, total=0)
     try:
@@ -1199,7 +1276,9 @@ def _run_full_scan(scan_date):
         with DIV_LOCK:
             DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
             DIV_SCAN["ts"] = time.time()
-        obs.record("INFO", "scan", f"全市场底背离扫描完成: {len(rows)}条信号入库")
+        obs.record("INFO", "scan",
+                   f"全市场底背离扫描完成: {len(rows)}条信号入库, "
+                   f"耗时 {time.time()-t0:.0f}s")
         return True
     except Exception as e:
         obs.record("ERROR", "scan", f"全市场扫描中断: {e!r}")
@@ -1845,8 +1924,33 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/divergences":
             with CFG_LOCK:
                 watch_codes = {s.get("code") for s in load_cfg().get("stocks", [])}
+
+            def _prio(ml):
+                """信号分级: 按模型质量分划档, 供前端默认过滤(只看medium+)"""
+                if ml is None:
+                    return "unscored"
+                if ml >= 75:
+                    return "high"
+                if ml >= 60:
+                    return "medium"
+                if ml >= 40:
+                    return "low"
+                return "reject"
+
+            def _fused(ml, res):
+                """融合分: 模型分(0.7权重) x 共振分(0.3权重)几何加权"""
+                m = (ml if ml is not None else 50.0) / 100.0
+                r = max(0.05, min(1.0, (res or 0) / 9.0))
+                return round((m ** 0.7) * (r ** 0.3) * 100, 1)
+
             with DIV_LOCK:
-                rows = [{**r, "watch": r["code"] in watch_codes} for r in DIV_SCAN["rows"]]
+                # ml_score_cal: 校准分(样本外真实胜率%), 不改写库中ml_score原值
+                rows = [{**r, "watch": r["code"] in watch_codes,
+                         "ml_score_cal": (ml_model.calibrated_score(r["ml_score"])
+                                         if r.get("ml_score") is not None else None),
+                         "prio": _prio(r.get("ml_score")),
+                         "fused": _fused(r.get("ml_score"), r.get("score"))}
+                        for r in DIV_SCAN["rows"]]
                 payload = {"ts": DIV_SCAN["ts"], "scanning": DIV_SCAN["scanning"],
                            "done": DIV_SCAN["done"], "total": DIV_SCAN["total"],
                            "rows": rows}
@@ -1875,6 +1979,17 @@ class Handler(BaseHTTPRequestHandler):
                 st["ml_meta"] = {k: m.get(k) for k in
                                  ("auc", "base_win", "n_samples", "trained_at", "wf")}
             self._json(st)
+        elif u.path == "/api/model_explain":
+            # 模型解释: 标准化系数绝对值Top10(正=推高胜率, 负=压低胜率)
+            if not ml_model.load_model():
+                self._json([])
+            else:
+                m = ml_model._MODEL
+                names = list(ml_model.EXPANDED)
+                coefs = m.get("coef") or []
+                pairs = sorted(zip(coefs, names), key=lambda x: -abs(x[0]))[:10]
+                self._json([{"name": n, "w": round(float(w), 3)}
+                            for w, n in pairs])
         elif u.path == "/api/tags":
             # 共振标签定义(前端展示徽章用)
             self._json({"labels": TAG_LABELS, "weights": TAG_WEIGHTS})
@@ -1890,12 +2005,13 @@ class Handler(BaseHTTPRequestHandler):
                 "default_model": DS_DEFAULT_MODEL,
             })
         elif u.path == "/api/ai/picks":
-            # 最近一次选股结果 + 运行状态 + 近30日成绩统计
+            # 最近一次选股结果 + 运行状态 + 近30日成绩统计与逐日走势
             d, rows = db.ai_picks_latest()
             self._json({"running": AI_STATE["running"], "date": d,
                         "rows": rows, "msg": AI_STATE["msg"],
                         "ts": AI_STATE["ts"], "top_n": AI_TOP_N,
-                        "hour": AI_PICK_HOUR, "stats": db.pick_hist_stats(30)})
+                        "hour": AI_PICK_HOUR, "stats": db.pick_hist_stats(30),
+                        "series": db.pick_hist_series(30)})
         elif u.path == "/api/zt/pool":
             # 涨停股池明细+当日情绪(短线策略看板); ?date=YYYY-MM-DD 可查历史
             q = parse_qs(u.query)
@@ -1954,9 +2070,21 @@ class Handler(BaseHTTPRequestHandler):
                 n_intraday = len(INTRADAY_ROWS)
             with RESONANCE_LOCK:
                 n_res = len(RESONANCE_ROWS)
+            # monitor心跳年龄(秒): monitor.py每轮扫描结束写monitor_heartbeat,
+            # >900秒或-1(文件缺失/损坏)即前端红色告警"监控进程疑似停止"
+            hb_age = -1
+            try:
+                hb = open(os.path.join(BASE, "monitor_heartbeat"),
+                          encoding="utf-8").read().strip()
+                hb_age = (datetime.now(timezone(timedelta(hours=8)))
+                          - datetime.fromisoformat(hb)).total_seconds()
+            except Exception:
+                hb_age = -1
             self._json({"ok": True, "sources": net.health(), "scan": scan,
                         "sse_subs": nsubs, "kline_bars": kc, "intraday": n_intraday,
                         "resonance": n_res, "obs": obs.health(),
+                        "monitor_hb_age_sec": (round(hb_age, 1)
+                                               if hb_age >= 0 else -1),
                         "db_signals": len(db.div_rows(3650))})
         elif u.path == "/api/stream":
             self._handle_stream(parse_qs(u.query).get("codes", [""])[0])

@@ -96,13 +96,44 @@ def phase1_backfill():
     log(f"[阶段1] 回填完成: {done} 条写入, {fail} 条数据不可用")
 
 
+def _ctx_sources():
+    """准备 ctx 数据源(一次性): 上证指数K线 / 情绪快照 / 行业动量与归属。
+    指数K线走本地缓存(增量+容灾), 网络失败也能用旧数据完成特征对齐"""
+    import webui
+    idx_bars = None
+    try:
+        idx_bars = webui.get_kline_cached("sh000001", "day", 800)
+    except Exception:
+        idx_bars = None
+    mood_map = db.zt_mood_map()
+    # 行业动量: 确认日各行业涨停股平均涨幅; 行业归属取每只股票最近一次涨停的行业
+    ind_mom_map, code_ind = {}, {}
+    with db.conn() as c:
+        pcols = {r[1] for r in c.execute("PRAGMA table_info(zt_pool)")}
+        if {"date", "code", "hybk"} <= pcols:
+            for r in c.execute(
+                    """SELECT date, hybk, ROUND(AVG(pct), 2) m FROM zt_pool
+                       GROUP BY date, hybk"""):
+                ind_mom_map[(r["date"], r["hybk"])] = r["m"]
+            for r in c.execute(
+                    """SELECT p.code, p.hybk FROM zt_pool p
+                       JOIN (SELECT code, MAX(date) md FROM zt_pool
+                             GROUP BY code) t
+                         ON p.code = t.code AND p.date = t.md"""):
+                code_ind[r["code"]] = r["hybk"]
+    return idx_bars, mood_map, ind_mom_map, code_ind
+
+
 def phase2_dataset():
     """构建特征+标签数据集(结果缓存到 dataset.json)"""
     if USE_CACHE and os.path.exists(DATASET_PATH):
         with open(DATASET_PATH, encoding="utf-8") as f:
             rows = json.load(f)
-        log(f"[阶段2] 从缓存加载数据集: {len(rows)} 样本")
-        return rows
+        # 特征维度变更后旧缓存不可用(缺新特征键), 自动作废重建
+        if rows and all(k in rows[0] for k in FEATURES):
+            log(f"[阶段2] 从缓存加载数据集: {len(rows)} 样本")
+            return rows
+        log("[阶段2] 旧缓存缺新特征键, 作废重建")
     import webui
     with db.conn() as c:
         sigs = [dict(r) for r in c.execute(
@@ -113,6 +144,10 @@ def phase2_dataset():
     for s in sigs:
         groups[(s["code"], s["tf"])].append(s)
     log(f"[阶段2] 信号 {len(sigs)} 条, {len(groups)} 组, 开始拉K线构建数据集")
+    idx_bars, mood_map, ind_mom_map, code_ind = _ctx_sources()
+    if not idx_bars:
+        log("[阶段2] 上证指数K线不可用, 无法构建指数特征, 终止(防静默填充)")
+        sys.exit(1)
     rows = []
     t0 = time.time()
     for gi, ((code, tf), ss) in enumerate(groups.items(), 1):
@@ -131,7 +166,12 @@ def phase2_dataset():
             if s["confirm"] not in dates:
                 continue
             cidx = dates.index(s["confirm"])
-            feats = build_features(klines, s)
+            ind = code_ind.get(s["code"])
+            ctx = {"idx": idx_bars,
+                   "mood": mood_map.get(s["confirm"]),
+                   "ind_mom": (ind_mom_map.get((s["confirm"], ind), 0.0)
+                               if ind else 0.0)}
+            feats = build_features(klines, s, ctx)
             if feats is None or atr[cidx] is None:
                 continue
             label = triple_barrier_label(klines, cidx, atr[cidx])

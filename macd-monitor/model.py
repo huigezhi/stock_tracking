@@ -18,6 +18,8 @@
 import json
 import math
 import os
+import re
+from bisect import bisect_right
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE, "model.json")
@@ -42,6 +44,12 @@ FEATURES = [
     "kdj_gold",       # KDJ金叉共振(0/1)
     "week_align",     # 周线同向(0/1)
     "vol_engulf",     # 放量反包(0/1)
+    # --- 大盘环境/情绪/行业上下文(ctx, 确认日当日快照, 严格对齐) ---
+    "idx_ma60_pos",   # 上证指数收盘/MA60-1: 大盘趋势位置
+    "idx_ret20",      # 上证指数近20交易日收益: 大盘阶段动能
+    "mood_temp",      # 涨停情绪温度(0-100, 缺失填中性50)
+    "mood_zb_rate",   # 涨停炸板率(小数, 缺失填中性0.3)
+    "ind_momentum",   # 确认日所属行业涨停股平均涨幅(行业动量)
 ]
 
 # 特征交互项(基于线性模型系数重要性前6的两两乘积):
@@ -53,6 +61,9 @@ INTERACTIONS = [
     ("ret60", "atr_pct"), ("ret60", "ma60_pos"), ("ret60", "ret20"),
     ("rsi14", "atr_pct"), ("rsi14", "ma60_pos"), ("rsi14", "ret20"),
     ("atr_pct", "ma60_pos"), ("atr_pct", "ret20"), ("ma60_pos", "ret20"),
+    ("idx_ma60_pos", "zero_depth"),   # 深度超跌 x 弱市(跌势末端)
+    ("idx_ret20", "rsi14"),           # 大盘动能 x 超卖修复
+    ("mood_temp", "zero_depth"),      # 情绪温度 x 超跌深度
 ]
 
 # 展开后特征名(模型系数的实际顺序)
@@ -133,12 +144,15 @@ def ma_val(closes, i, n):
 
 # ---------------- 特征计算(无未来函数的核心) ----------------
 
-def build_features(klines, sig):
+def build_features(klines, sig, ctx=None):
     """对单个底背离信号计算特征向量。
 
     klines: [[date, open, close, high, low, volume], ...] 前复权
     sig: {date1, date2, price1, price2, dif1, dif2, score, tags,
           confirm, confirm_close}
+    ctx: {idx: 上证指数OHLCV列表, mood: {temp, zb_rate}, ind_mom: float}
+         指数数据必须能严格对齐到确认日, 对不上返回None(丢弃样本, 防止
+         静默填充引入偏差); 情绪缺失用中性值填充(仅近90天有数据)。
     返回 dict(特征名->值) 或 None(数据不足)。只用索引<=cidx的数据。
     """
     dates = [k[0] for k in klines]
@@ -154,6 +168,22 @@ def build_features(klines, sig):
     p1, p2 = dates.index(date1), dates.index(date2)
     if not (0 < p1 < p2 <= cidx):
         return None
+
+    # --- 指数特征: 严格对齐, 对不上丢弃样本, 防止静默填充 ---
+    ctx = ctx or {}
+    idx = ctx.get("idx")
+    if not idx:
+        return None
+    idx_dates = [k[0] for k in idx]
+    if confirm not in idx_dates:
+        return None
+    ii = idx_dates.index(confirm)
+    if ii < 60:
+        return None
+    idx_c = [k[2] for k in idx]
+    idx_ma60 = sum(idx_c[ii - 59:ii + 1]) / 60.0
+    # --- 情绪特征: 仅近90天有数据, 缺失用中性值填充 ---
+    mood = ctx.get("mood") or {}
 
     closes = [k[2] for k in klines]
     highs = [k[3] for k in klines]
@@ -186,7 +216,7 @@ def build_features(klines, sig):
     ma20_prev = ma_val(closes, cidx - 10, 20)
     tags = set((sig.get("tags") or "").split(","))
 
-    return {
+    feat = {
         "rsi14": rsi[cidx],
         "dif_inc_n": (dif2 - dif1) / a,
         "zero_depth": dif2 / price2,
@@ -205,7 +235,17 @@ def build_features(klines, sig):
         "kdj_gold": 1.0 if "kdj_gold" in tags else 0.0,
         "week_align": 1.0 if "week_align" in tags else 0.0,
         "vol_engulf": 1.0 if "vol_engulf" in tags else 0.0,
+        # --- ctx 上下文特征(指数取确认日及之前, 情绪缺失填中性) ---
+        "idx_ma60_pos": idx_c[ii] / idx_ma60 - 1.0 if idx_ma60 else 0.0,
+        "idx_ret20": (idx_c[ii] / idx_c[ii - 20] - 1.0
+                      if ii >= 20 and idx_c[ii - 20] else 0.0),
+        "mood_temp": (float(mood["temp"])
+                      if mood.get("temp") is not None else 50.0),
+        "mood_zb_rate": (float(mood["zb_rate"]) / 100.0
+                         if mood.get("zb_rate") is not None else 0.3),
+        "ind_momentum": float(ctx.get("ind_mom") or 0.0),
     }
+    return feat
 
 
 # ---------------- 三重障碍标签 ----------------
@@ -283,3 +323,52 @@ def model_score(features, path=MODEL_PATH):
         z += c * xi
     p = 1 / (1 + math.exp(-max(-30, min(30, z))))
     return round(p * 100, 1)
+
+
+def calibrated_score(raw100):
+    """把balanced回归的原始模型分映射为样本外真实胜率(展示层校准)。
+
+    class_weight="balanced"的LogisticRegression输出概率系统性偏离
+    基础胜率, 不宜直接当"胜率"展示。用walk-forward样本外分桶的实际
+    胜率做分段线性插值, 把0-100原始分校准为"历史同类信号真实胜率%"。
+    无wf分桶数据(旧模型/残缺模型)时原样返回, 保持向后兼容。
+    """
+    if raw100 is None:
+        return None
+    bk = ((_MODEL.get("wf") or {}).get("buckets")) or []
+    if not bk:
+        return raw100
+    try:
+        # 分桶键形如 "0-40"/"40-60"/">=75" -> 取桶上沿做插值控制点
+        pts = []
+        for b in bk:
+            win = b.get("win")
+            if win is None:
+                continue
+            key = str(b.get("key") or b.get("label") or "")
+            nums = re.findall(r"\d+(?:\.\d+)?", key)
+            if not nums:
+                continue
+            hi = float(nums[-1])
+            if key.startswith(">="):     # 顶桶(>=75)上沿扩到100
+                hi = 100.0
+            pts.append((hi, float(win)))
+        pts.sort()
+        # 去重(相邻桶上沿重合时保留后值), 至少2个控制点才可插值
+        xs, ys = [], []
+        for hi, win in pts:
+            if xs and hi <= xs[-1]:
+                continue
+            xs.append(hi)
+            ys.append(win)
+        if len(xs) < 2:
+            return raw100
+        xs = [0.0] + xs
+        ys = [ys[0]] + ys
+        i = min(bisect_right(xs, float(raw100)) - 1, len(xs) - 2)
+        i = max(i, 0)
+        t = (float(raw100) - xs[i]) / (xs[i + 1] - xs[i])
+        t = max(0.0, min(1.0, t))
+        return round(ys[i] + t * (ys[i + 1] - ys[i]), 1)
+    except Exception:
+        return raw100

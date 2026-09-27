@@ -83,8 +83,29 @@ def _publish_model(version_file):
             pass
 
 
+def weekly_maintenance():
+    """每周一次库维护: 修剪过期K线扫描缓存 + VACUUM回收空间 + 统计信息优化。
+    注: 本脚本由cron在周一~周五触发, 故挂在周一执行(原方案的周日不会被触发)"""
+    import db
+    try:
+        db.kscan_prune(400)
+        c = db.conn()
+        old_il = c.isolation_level
+        c.isolation_level = None       # VACUUM/PRAGMA不能在事务内执行
+        try:
+            c.execute("PRAGMA optimize;")
+            c.execute("VACUUM;")
+        finally:
+            c.isolation_level = old_il
+        log("周维护: VACUUM + K线缓存修剪 完成")
+    except Exception as e:
+        log("周维护失败: {!r}".format(e))
+
+
 def main():
     today = datetime.date.today()
+    if today.weekday() == 0:            # 周一: 顺带周维护(节假日也不跳过)
+        weekly_maintenance()
     if not is_trading_day(today):
         log("跳过: {} 非交易日".format(today))
         return
