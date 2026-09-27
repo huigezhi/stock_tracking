@@ -989,10 +989,19 @@ function renderSysHealth(h) {
   const domains = Object.entries((h.sources || {}).domains || {})
     .map(([d, s]) => `${d}${s.open_sec > 0 ? `(熔断中${s.open_sec}s)` : `(连续失败${s.fails})`}`)
     .join('、') || '正常';
+  const hb = h.monitor_hb_age_sec;
+  const hbOk = hb != null && hb >= 0 && hb <= 900;
+  const hbTxt = hbOk
+    ? (hb < 90 ? `${Math.floor(hb)}秒前` : `${Math.floor(hb / 60)}分前`)
+    : (hb > 900 ? `${Math.floor(hb / 60)}分前` : '无心跳');
+  const hbAlert = hbOk ? '' :
+    `<div class="sh-alert">⚠ 监控进程疑似停止（最后心跳 ${hbTxt}），信号推送可能中断，请检查 monitor.py 是否在运行</div>`;
   document.getElementById('sysHealth').innerHTML =
+    hbAlert +
     `<div class="sh-grid">` +
     card('运行时长', fmtUptime(o.uptime_sec || 0)) +
     card('24h错误', o.errors_24h || 0, (o.errors_24h || 0) > 0) +
+    card('监控心跳', hbTxt, !hbOk) +
     card('缓冲事件', o.events || 0) +
     card('SSE订阅', h.sse_subs || 0) +
     card('K线缓存', (h.kline_bars || 0).toLocaleString()) +
@@ -1214,6 +1223,52 @@ function _ccrCell(e) {
   return '--';
 }
 
+/* 近30日AI选股5日胜率走势(SVG折线): AI精选 vs 动能分Top10降级, 供人工决策是否续费 */
+function renderAiTrend(series, stats) {
+  const el = document.getElementById('aiTrend');
+  if (!el) return;
+  const pts = (series || []).filter(x =>
+      (x.ai && x.ai.win5 != null) || (x.model && x.model.win5 != null));
+  if (pts.length < 2) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  const W = 640, H = 150, L = 36, R = 10, T = 10, B = 20;
+  const iw = W - L - R, ih = H - T - B;
+  const x = i => L + iw * i / (pts.length - 1);
+  const y = v => T + ih * (1 - v / 100);
+  const path = src => {
+    let d = '', pen = false;
+    pts.forEach((p, i) => {
+      const v = p[src] && p[src].win5;
+      if (v == null) { pen = false; return; }
+      d += (pen ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1) + ' ';
+      pen = true;
+    });
+    return d;
+  };
+  const grid = [0, 50, 100].map(v =>
+      `<line x1="${L}" y1="${y(v)}" x2="${W - R}" y2="${y(v)}" stroke="var(--line)"/>` +
+      `<text x="${L - 6}" y="${y(v) + 3}" text-anchor="end" class="at-txt">${v}</text>`).join('');
+  const bs = (stats && stats.by_source) || {};
+  const aiW = bs.ai && bs.ai.win5, mdW = bs.model && bs.model.win5;
+  const cmp = (aiW != null || mdW != null)
+      ? `AI ${aiW != null ? aiW + '%' : '--'} · 动能分 ${mdW != null ? mdW + '%' : '--'}`
+      : '';
+  el.innerHTML = `
+    <div class="ai-trend-head">
+      <span>近30日选股 5日胜率走势
+        <small><i class="at-ai"></i>AI精选 <i class="at-md"></i>动能分Top10</small></span>
+      <span class="ai-trend-cmp">${cmp}</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" class="ai-trend-svg" preserveAspectRatio="none">
+      ${grid}
+      <path d="${path('ai')}" fill="none" stroke="var(--up)" stroke-width="2"/>
+      <path d="${path('model')}" fill="none" stroke="#3b82f6" stroke-width="1.5"
+            stroke-dasharray="4 3"/>
+      <text x="${L}" y="${H - 6}" class="at-txt">${pts[0].date.slice(5)}</text>
+      <text x="${W - R}" y="${H - 6}" text-anchor="end" class="at-txt">${pts[pts.length - 1].date.slice(5)}</text>
+    </svg>`;
+}
+
 function renderAiPicks(d) {
   aiPickRows = d.rows || [];
   aiRunning = !!d.running;
@@ -1229,7 +1284,7 @@ function renderAiPicks(d) {
     st.textContent = '尚未运行过选股';
     st.className = 'ai-status';
   }
-  // 近30日成绩统计(胜率/平均收益)
+  // 近30日成绩统计(胜率/平均收益) + 5日胜率走势折线卡
   const s = d.stats, el = document.getElementById('aiStats');
   if (s && s.n) {
     const cell = (w, a) => w == null ? '--' : `${w}% / ${a > 0 ? '+' : ''}${a}%`;
@@ -1239,6 +1294,7 @@ function renderAiPicks(d) {
   } else {
     el.textContent = '';
   }
+  renderAiTrend(d.series, d.stats);
   const box = document.getElementById('aiPicks');
   if (!d.date || !aiPickRows.length) {
     box.innerHTML = `<div class="empty">暂无选股结果：点击「立即选股」手动运行，` +
@@ -1406,6 +1462,7 @@ document.getElementById('q').addEventListener('input', () => {
 /* ================= 底背离标的面板 ================= */
 let divAll = [];        // 全部行(最近30个扫描日)
 let divFiltered = [];   // 筛选后的行
+let divFolded = 0;      // 被优先级过滤折叠的低分行数
 let divRetryTimer = null;
 
 async function loadDivs() {
@@ -1504,11 +1561,12 @@ function updateDivConfirmOptions() {
   sel.value = dates.includes(cur) ? cur : '';
 }
 
-/* 列排序: 默认按确认日期倒序, 'asc'/'desc'=升降序; 空值排最后 */
-let divSort = {key: 'confirm', dir: 'desc'};
+/* 列排序: 默认按融合分降序(T3.1), 'asc'/'desc'=升降序; 空值排最后 */
+let divSort = {key: 'fused', dir: 'desc'};
 const DIV_SORT_COLS = {confirm: 'sortConfirm', dif_inc: 'sortDifInc', chg3: 'sortChg3',
                        chg5: 'sortChg5', ml_score: 'sortMl', score: 'sortScore', name: 'sortName', tf: 'sortTf',
-                       date2: 'sortDate2', price2: 'sortPrice2', dif2: 'sortDif2'};
+                       date2: 'sortDate2', price2: 'sortPrice2', dif2: 'sortDif2',
+                       fused: 'sortFused'};
 const TAG_LABELS = {vol_shrink: '缩量', ma_hold: '均线托底', rsi_repair: 'RSI修复',
                     kdj_gold: 'KDJ金叉', week_align: '周线同向', vol_engulf: '放量反包'};
 
@@ -1532,25 +1590,43 @@ function applyDivFilters() {
   const date = document.getElementById('divDate').value;
   const confirm = document.getElementById('divConfirm').value;
   const watch = document.getElementById('divWatch').value;
-  divFiltered = divAll.filter(r =>
+  const prio = document.getElementById('divPrio').value;
+  const base = divAll.filter(r =>
       (!tf || r.tf === tf) &&
       (!date || r.scan === date) &&
       (!confirm || (r.confirm || '') === confirm) &&
       (watch === '' || !!r.watch === (watch === '1')) &&
       (!q || r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q)));
+  /* 默认只看模型分>=60的中高优先级; 折叠数=仅被优先级过滤掉的行数 */
+  divFolded = base.filter(r => r.ml_score == null || r.ml_score < 60).length;
+  divFiltered = prio === 'good'
+      ? base.filter(r => r.ml_score != null && r.ml_score >= 60)
+      : base;
   renderDivTable();
+}
+
+/* 点击"已折叠N条低分信号"展开全部 */
+function showAllPrio() {
+  document.getElementById('divPrio').value = '';
+  applyDivFilters();
 }
 
 function renderDivTable() {
   const body = document.getElementById('divBody');
   document.getElementById('divCount').textContent =
       divAll.length ? `${divFiltered.length} / ${divAll.length} 条` : '';
+  const fold = document.getElementById('divFolded');
+  if (fold) {
+    const prioOn = document.getElementById('divPrio').value === 'good';
+    fold.style.display = (prioOn && divFolded > 0) ? '' : 'none';
+    fold.textContent = `已折叠 ${divFolded} 条低分信号`;
+  }
   if (!divAll.length) {
-    body.innerHTML = '<tr><td colspan="12" class="empty">暂无底背离标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="empty">暂无底背离标的</td></tr>';
     return;
   }
   if (!divFiltered.length) {
-    body.innerHTML = '<tr><td colspan="12" class="empty">无符合条件的标的</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="empty">无符合条件的标的</td></tr>';
     return;
   }
   let rows = divFiltered;
@@ -1578,6 +1654,18 @@ function renderDivTable() {
     if (r.ml_score == null) return '<td class="dv">--</td>';
     const v = r.ml_score;
     const cls = v >= 60 ? 'sc-hi' : v >= 40 ? 'sc-mid' : 'sc-lo';
+    return `<td class="dv"><b class="${cls}">${v.toFixed(0)}</b>${prioBadge(r)}</td>`;
+  };
+  const prioBadge = r => {
+    const map = {high: ['高', 'prio-high'], medium: ['中', 'prio-med'],
+                 low: ['低', 'prio-low'], reject: ['弃', 'prio-low']};
+    const m = map[r.prio];
+    return m ? `<span class="prio-b ${m[1]}">${m[0]}</span>` : '';
+  };
+  const fusedCell = r => {
+    if (r.fused == null) return '<td class="dv">--</td>';
+    const v = r.fused;
+    const cls = v >= 70 ? 'fz-hi' : v >= 40 ? 'fz-mid' : 'fz-lo';
     return `<td class="dv"><b class="${cls}">${v.toFixed(0)}</b></td>`;
   };
   body.innerHTML = rows.map((r, i) => `
@@ -1593,6 +1681,7 @@ function renderDivTable() {
       <td class="dv">${fmtPct(r.chg5)}</td>
       ${mlCell(r)}
       ${scoreCell(r)}
+      ${fusedCell(r)}
       <td class="dd">${r.confirm}</td>
     </tr>`).join('');
 }
@@ -1614,8 +1703,11 @@ async function openStats() {
   const body = document.getElementById('statsBody');
   body.innerHTML = '加载中…';
   try {
-    const r = await apiFetch('/api/stats');
-    renderStats(await r.json());
+    const [r, re] = await Promise.all([
+      apiFetch('/api/stats'),
+      apiFetch('/api/model_explain').catch(() => null)
+    ]);
+    renderStats(await r.json(), re ? await re.json() : []);
   } catch (e) {
     body.innerHTML = '<div class="empty">加载失败, 请重试</div>';
   }
@@ -1625,18 +1717,56 @@ function closeStats() {
   document.getElementById('statsBox').style.display = 'none';
 }
 
-/* 模型样本外(walk-forward)指标说明: 上方历史分层为样本内打分, 会偏乐观;
-   此处以模型训练时的样本外评估为准 */
-function mlWfNote(meta) {
+/* 样本外(walk-forward)真实预期卡片: 与上方"历史回填(样本内)"分层明确区分;
+   wf.buckets 为空(旧模型/未训练)时不渲染 */
+function mlWfCard(meta) {
   if (!meta || !meta.wf || !meta.wf.buckets || !meta.wf.buckets.length) return '';
   const wf = meta.wf;
-  const buckets = wf.buckets.map(b =>
-    `模型分${b.key}: ${b.win}%`).join(' · ');
-  return `<div class="wf-note">样本外评估(walk-forward, ${wf.n}样本): AUC ${wf.auc}, 基线胜率 ${wf.base_win}% —— ${buckets}
-    <br><small>历史信号由全量模型回填打分(样本内), 上表分层偏乐观; 线上对新信号的打分应参考本行样本外口径。模型训练于 ${meta.trained_at}。</small></div>`;
+  const buckets = wf.buckets.map(b => `
+    <div class="sc-cell">
+      <div class="sc-n">模型分${b.key}</div>
+      <div class="sc-win">${b.win}%</div>
+      <div class="sc-cnt">${b.n}样本</div>
+    </div>`).join('');
+  return `
+    <h4>真实预期(样本外 walk-forward)</h4>
+    <div class="wf-note wf-card">
+      <div class="sc-cells">${buckets}</div>
+      <div class="wf-meta">样本外AUC <b>${wf.auc}</b> · 基线胜率 ${wf.base_win}% · ${wf.n}样本 · 模型训练于 ${meta.trained_at || '--'}
+        <br><small>上方"历史回填"分层为样本内口径, 偏乐观; 对新信号的预期请以本卡片样本外胜率为准。</small></div>
+    </div>`;
 }
 
-function renderStats(s) {
+/* 模型解释: 标准化系数Top10横向条形图, 正值右延(红)负值左延(绿) */
+function mlExplainChart(items) {
+  if (!items || !items.length) return '';
+  const CN = {
+    rsi14: 'RSI超卖', dif_inc_n: 'DIF抬升强度', zero_depth: '零轴深度',
+    price_drop: '新低幅度', ret20: '近20日跌幅', ret60: '近60日跌幅',
+    vol_ratio: '放量程度', vol_shrink: '探底缩量', ma60_pos: 'MA60位置',
+    ma20_slope: 'MA20斜率', atr_pct: '波动率ATR', off_low: '脱离低点',
+    pivot_gap: '形态时长', hist_rise: 'MACD柱拐头', score: '共振分',
+    kdj_gold: 'KDJ金叉', week_align: '周线同向', vol_engulf: '放量反包',
+    idx_ma60_pos: '大盘MA60位置', idx_ret20: '大盘20日动能',
+    mood_temp: '情绪温度', mood_zb_rate: '炸板率', ind_momentum: '行业动量'
+  };
+  const maxW = Math.max(...items.map(x => Math.abs(x.w)), 0.001);
+  const rows = items.map(x => {
+    const pct = Math.min(100, Math.abs(x.w) / maxW * 100);
+    const bar = x.w >= 0
+        ? `<div class="mx-l"></div><div class="mx-r"><i style="width:${pct}%"></i></div>`
+        : `<div class="mx-l"><i style="width:${pct}%"></i></div><div class="mx-r"></div>`;
+    return `<div class="mx-row">
+      <span class="mx-name" title="${x.name}">${CN[x.name] || x.name}</span>
+      <div class="mx-bar">${bar}</div>
+      <span class="mx-w">${x.w > 0 ? '+' : ''}${x.w}</span></div>`;
+  }).join('');
+  return `<h4>模型在关注什么(标准化系数Top10)</h4>
+    <div class="mx-chart">${rows}</div>
+    <div class="sc-note">正值(红)推高胜率, 负值(绿)压低胜率; "A*B"为两特征交互项</div>`;
+}
+
+function renderStats(s, explain) {
   const body = document.getElementById('statsBody');
   if (!s || !s.total) {
     body.innerHTML = '<div class="empty">暂无已跟踪信号(扫描运行后按日积累)</div>';
@@ -1674,14 +1804,15 @@ function renderStats(s) {
       <tbody>${rowsHtml(s.by_tf)}${rowsHtml(s.by_score)}</tbody>
     </table>
     ${s.by_ml && s.by_ml.some(x => x.n3 > 0) ? `
-    <h4>按模型分分层(元标签信号质量模型)</h4>
+    <h4>按模型分分层(历史回填, 样本内, 仅供参考)</h4>
     <table class="stats-table">
       <thead><tr><th>模型分</th><th>样本</th><th>3日胜率</th><th>3日均收</th>
       <th>5日胜率</th><th>5日均收</th><th>10日胜率</th><th>10日均收</th>
       <th>20日胜率</th><th>20日均收</th><th>60日胜率</th><th>60日均收</th></tr></thead>
       <tbody>${rowsHtml(s.by_ml)}</tbody>
     </table>
-    ${mlWfNote(s.ml_meta)}` : ''}
+    ${mlWfCard(s.ml_meta)}` : ''}
+    ${mlExplainChart(explain)}
     <h4>按确认月份(近12个月)</h4>
     <table class="stats-table slim">
       <thead><tr><th>月份</th><th>信号数</th><th>5日胜率</th><th>5日均收</th><th>20日均收</th></tr></thead>

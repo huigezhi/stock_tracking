@@ -28,6 +28,11 @@ for s in sigs:
 
 import webui
 
+# ctx 数据源: 指数K线(本地缓存容灾) + 按确认日取情绪(与扫描/训练同口径);
+# ind_mom 线上统一置0(与全市场扫描一致, 训练侧保留完整行业动量)
+IDX_BARS = webui._index_bars()
+MOOD_MAP = db.zt_mood_map()
+
 done = skip = 0
 t0 = time.time()
 for gi, ((code, tf), ss) in enumerate(groups.items(), 1):
@@ -41,7 +46,9 @@ for gi, ((code, tf), ss) in enumerate(groups.items(), 1):
         continue
     updates = []
     for s in ss:
-        feats = build_features(klines, s)
+        feats = build_features(klines, s, ctx={
+            "idx": IDX_BARS, "mood": MOOD_MAP.get(s["confirm"]),
+            "ind_mom": 0.0})
         if feats is None:
             continue
         sc = ml_model.model_score(feats)

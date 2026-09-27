@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS div_signal(
 );
 CREATE INDEX IF NOT EXISTS idx_div_confirm ON div_signal(confirm);
 CREATE INDEX IF NOT EXISTS idx_div_scan_last ON div_signal(scan_last);
+CREATE INDEX IF NOT EXISTS idx_div_confirm_tf ON div_signal(confirm DESC, tf);
+CREATE INDEX IF NOT EXISTS idx_sig_track_fwd20
+  ON signal_track(fwd20) WHERE fwd20 IS NOT NULL;
 
 -- 信号跟踪: 确认日收盘后N个交易日收益%(自confirm_close), 供复盘统计
 CREATE TABLE IF NOT EXISTS signal_track(
@@ -87,6 +90,21 @@ CREATE TABLE IF NOT EXISTS fin_quality(
   code TEXT PRIMARY KEY,
   eps REAL, ocf_ps REAL, ccr REAL, ccr_avg REAL,
   report_date TEXT, updated TEXT
+);
+
+-- 全市场扫描K线缓存: 每标的每周期一份, 每日扫描最多一次网络拉取;
+-- 列序与 webui.fetch_kline 完全一致 [date, open, close, high, low, volume]
+CREATE TABLE IF NOT EXISTS kline_scan_cache(
+  code TEXT NOT NULL, tf TEXT NOT NULL, label TEXT NOT NULL,
+  o REAL, c REAL, h REAL, l REAL, v REAL,
+  PRIMARY KEY(code, tf, label)
+);
+CREATE INDEX IF NOT EXISTS idx_ksc ON kline_scan_cache(code, tf, label DESC);
+-- meta: 最近一次全量刷新时间(超7天强制全量, 修正前复权漂移)
+CREATE TABLE IF NOT EXISTS kline_scan_meta(
+  code TEXT NOT NULL, tf TEXT NOT NULL,
+  full_date TEXT, full_ts REAL,
+  PRIMARY KEY(code, tf)
 );
 """
 
@@ -338,7 +356,8 @@ def update_pick_track(pick_date, code, fwd):
 
 
 def pick_hist_stats(days=30):
-    """近N个选股日的成绩汇总: 次日/3日/5日胜率与平均收益(收益>0计胜)"""
+    """近N个选股日的成绩汇总: 次日/3日/5日胜率与平均收益(收益>0计胜);
+    by_source按来源拆分(ai=deepseek精选 / model=动能分降级), 供对比展示"""
     with conn() as c:
         base = c.execute(
             "SELECT MAX(pick_date) FROM ai_pick").fetchone()[0]
@@ -348,12 +367,51 @@ def pick_hist_stats(days=30):
             """SELECT t.fwd1, t.fwd3, t.fwd5 FROM ai_pick_track t
                WHERE t.pick_date > date(?, ?)""",
             (base, f"-{days} day")).fetchall()
-    out = {"n": len(rows)}
-    for n in (1, 3, 5):
-        vals = [r[f"fwd{n}"] for r in rows if r[f"fwd{n}"] is not None]
-        out[f"win{n}"] = round(sum(v > 0 for v in vals) / len(vals) * 100, 1) if vals else None
-        out[f"avg{n}"] = round(sum(vals) / len(vals), 2) if vals else None
-    return out
+
+        def _agg(rows):
+            o = {"n": len(rows)}
+            for n in (1, 3, 5):
+                vals = [r[f"fwd{n}"] for r in rows if r[f"fwd{n}"] is not None]
+                o[f"win{n}"] = (round(sum(v > 0 for v in vals) / len(vals) * 100, 1)
+                                if vals else None)
+                o[f"avg{n}"] = round(sum(vals) / len(vals), 2) if vals else None
+            return o
+
+        out = _agg(rows)
+        out["by_source"] = {}
+        for src in ("ai", "model"):
+            srows = c.execute(
+                """SELECT t.fwd1, t.fwd3, t.fwd5
+                   FROM ai_pick_track t
+                   JOIN ai_pick p ON p.pick_date=t.pick_date AND p.code=t.code
+                   WHERE t.pick_date > date(?, ?) AND p.source=?""",
+                (base, f"-{days} day", src)).fetchall()
+            out["by_source"][src] = _agg(srows)
+        return out
+
+
+def pick_hist_series(days=30):
+    """近N个选股日逐日5日胜率走势(按source分组): [{date, ai:{n,win5},
+    model:{n,win5}}, ...], 供前端折线卡片"""
+    with conn() as c:
+        base = c.execute(
+            "SELECT MAX(pick_date) FROM ai_pick").fetchone()[0]
+        if not base:
+            return []
+        rows = c.execute(
+            """SELECT t.pick_date d, p.source src,
+                      SUM(t.fwd5 IS NOT NULL) n,
+                      ROUND(AVG(CASE WHEN t.fwd5 IS NULL THEN NULL
+                                    WHEN t.fwd5>0 THEN 1.0 ELSE 0.0 END)*100, 1) win5
+               FROM ai_pick_track t
+               JOIN ai_pick p ON p.pick_date=t.pick_date AND p.code=t.code
+               WHERE t.pick_date > date(?, ?)
+               GROUP BY d, src ORDER BY d""",
+            (base, f"-{days} day")).fetchall()
+    by_date = {}
+    for r in rows:
+        by_date.setdefault(r["d"], {})[r["src"]] = {"n": r["n"], "win5": r["win5"]}
+    return [{"date": d, **v} for d, v in sorted(by_date.items())]
 
 
 # ---------------- 涨停股池与情绪 ----------------
@@ -408,6 +466,13 @@ def zt_mood_of(date=None):
             return None
         r = c.execute("SELECT * FROM zt_mood WHERE date=?", (d,)).fetchone()
         return dict(r) if r else None
+
+
+def zt_mood_map():
+    """全量情绪快照: {date: {temp, zb_rate, ...}}(供训练/回填按确认日取情绪)"""
+    with conn() as c:
+        return {r["date"]: dict(r) for r in c.execute(
+            "SELECT * FROM zt_mood").fetchall()}
 
 
 def prune_zt(keep_days=90):
@@ -506,3 +571,55 @@ def stats():
             out["by_month"].append({"key": r[0], "n": r[1],
                                     "win5": r[2], "avg5": r[3], "avg20": r[4]})
         return out
+
+
+# ---------------- 全市场扫描K线缓存 ----------------
+
+def kscan_load(code, tf, n):
+    """读最近n根K线(时间升序), 列序与 webui.fetch_kline 一致: [date,o,c,h,l,v]"""
+    with conn() as c:
+        rows = c.execute(
+            """SELECT label,o,c,h,l,v FROM kline_scan_cache
+               WHERE code=? AND tf=? ORDER BY label DESC LIMIT ?""",
+            (code, tf, int(n))).fetchall()
+    return [[r[0], r[1], r[2], r[3], r[4], r[5]] for r in reversed(rows)]
+
+
+def kscan_last(code, tf):
+    """缓存中最新K线日期(无缓存返回None)"""
+    with conn() as c:
+        r = c.execute(
+            "SELECT MAX(label) FROM kline_scan_cache WHERE code=? AND tf=?",
+            (code, tf)).fetchone()
+    return r[0] if r else None
+
+
+def kscan_full_ts(code, tf):
+    """最近一次全量刷新时间戳(进程重启后仍可用, 避免重启后全量风暴)"""
+    with conn() as c:
+        r = c.execute(
+            "SELECT full_ts FROM kline_scan_meta WHERE code=? AND tf=?",
+            (code, tf)).fetchone()
+    return float(r[0]) if r and r[0] else 0.0
+
+
+def kscan_save(code, tf, bars):
+    """写入一段K线(同label以新数据覆盖), 并记录本次全量刷新时间戳"""
+    with conn() as c:
+        c.executemany(
+            """INSERT OR REPLACE INTO kline_scan_cache(code,tf,label,o,c,h,l,v)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            [(code, tf, b[0], b[1], b[2], b[3], b[4], b[5]) for b in bars])
+        c.execute(
+            """INSERT INTO kline_scan_meta(code,tf,full_date,full_ts)
+               VALUES(?,?,date('now','localtime'),?)
+               ON CONFLICT(code,tf) DO UPDATE SET
+                 full_date=excluded.full_date, full_ts=excluded.full_ts""",
+            (code, tf, time.time()))
+
+
+def kscan_prune(days=400):
+    """修剪过期K线缓存(周维护调用)"""
+    with conn() as c:
+        c.execute("DELETE FROM kline_scan_cache WHERE label < date('now', ?)",
+                  (f"-{days} day",))

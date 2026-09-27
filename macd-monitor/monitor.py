@@ -772,6 +772,14 @@ def main():
                                  f"标的: {len(cfg.get('stocks', []))}只\n"
                                  f"最后一轮: {last_round}\n"
                                  f"当前: 交易时段({cfg.get('poll_interval_sec', 30)}秒轮询)")
+            # 每轮结束写心跳文件, webui /api/health 据此判断监控进程是否存活
+            # (扫描抛异常时不写 -> 心跳变旧 -> 前端告警"疑似停止")
+            try:
+                with open(os.path.join(BASE, "monitor_heartbeat"), "w",
+                          encoding="utf-8") as f:
+                    f.write(now_cst().isoformat())
+            except Exception:
+                pass
         except Exception:
             log.exception("扫描异常")
         interval = cfg.get("poll_interval_sec", 30) if is_trading_time(now_cst()) else 300

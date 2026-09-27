@@ -386,6 +386,18 @@ body.dark .tag.zs { background: #3d331a; }
 .dsc .sc-hi { color: var(--up); }
 .dsc .sc-mid { color: #f5a623; }
 .dsc .sc-lo { color: var(--muted); }
+/* 优先级徽章与融合分(T3.1): high红/medium蓝/low灰 */
+.prio-b { display: inline-block; margin-left: 3px; padding: 0 4px; border-radius: 3px;
+          font-size: 10px; line-height: 15px; vertical-align: middle; }
+.prio-high { color: #fff; background: #d03a2f; }
+.prio-med { color: #fff; background: #3b82f6; }
+.prio-low { color: var(--muted); background: var(--line); }
+.fz-hi { color: var(--down); font-weight: 600; }
+.fz-mid { color: #f5a623; font-weight: 600; }
+.fz-lo { color: var(--muted); }
+.fold-link { color: var(--accent); cursor: pointer; font-size: 12px;
+             text-decoration: underline dotted; white-space: nowrap; }
+.fold-link:hover { opacity: .8; }
 .stats-btn { background: var(--line); color: var(--text); border: 1px solid var(--line);
              padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
              margin-right: 8px; }
@@ -548,6 +560,9 @@ body.dark .tag.zs { background: #3d331a; }
            text-align: center; background: var(--hover); }
 .sh-card.warn { border-color: var(--up); background: rgba(208,58,47,.06); }
 .sh-card.warn .sh-v { color: var(--up); }
+.sh-alert { margin-bottom: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+            color: var(--up); background: rgba(208,58,47,.08);
+            border: 1px solid rgba(208,58,47,.35); }
 .sh-v { font-size: 18px; font-weight: 700; font-family: var(--mono); }
 .sh-l { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .sh-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
@@ -609,6 +624,25 @@ body.dark .tag.zs { background: #3d331a; }
            border-radius: 6px; background: var(--hover);
            font-size: 12px; color: var(--muted); line-height: 1.6; }
 .wf-note small { opacity: .85; }
+/* 样本外真实预期卡片(T3.2): 分桶网格自适应列数 */
+.wf-card .sc-cells { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                     margin-bottom: 6px; }
+.wf-card .wf-meta b { color: var(--text); }
+/* 模型解释条形图(T3.3): 中轴分正负, 正值右延负值左延 */
+.mx-chart { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 4px; }
+.mx-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.mx-name { width: 130px; text-align: right; color: var(--muted);
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-bar { flex: 1; display: flex; height: 12px; position: relative; }
+.mx-bar::before { content: ''; position: absolute; left: 50%; top: -2px; bottom: -2px;
+                  width: 1px; background: var(--line); }
+.mx-l, .mx-r { width: 50%; display: flex; align-items: center; }
+.mx-l { justify-content: flex-end; }
+.mx-l i { background: var(--down); height: 10px; border-radius: 2px 0 0 2px; }
+.mx-r i { background: var(--up); height: 10px; border-radius: 0 2px 2px 0; }
+.mx-w { width: 44px; font-family: var(--mono); font-variant-numeric: tabular-nums;
+        color: var(--muted); }
+@media (max-width: 720px) { .mx-name { width: 90px; } }
 @media (max-width: 720px) { .sc-cells { grid-template-columns: repeat(2, 1fr); } }
 
 /* ============ 全局组件 ============ */
