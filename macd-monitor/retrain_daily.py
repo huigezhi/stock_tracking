@@ -11,12 +11,19 @@
 前置依赖(训练需要): pip3 install scikit-learn numpy requests
 """
 import datetime
+import json
 import os
+import shutil
 import subprocess
 import sys
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE, "retrain.log")
+MODELS_DIR = os.path.join(BASE, "models")
+AUC_PATH = os.path.join(BASE, "last_train_auc.txt")
+MODEL_PATH = os.path.join(BASE, "model.json")
+AUC_DROP_LIMIT = 0.02    # 新AUC比旧模型低超过此值时拒绝上线
+KEEP_VERSIONS = 7        # models/ 目录保留的版本文件数
 
 # ---- 2026年 A股非交易日(仅列"落在工作日的休市日"; 周六日由 weekday 判断兜底) ----
 HOLIDAYS_2026 = {
@@ -53,24 +60,69 @@ def is_trading_day(d):
     return d.strftime("%Y-%m-%d") not in table
 
 
+def _current_auc():
+    """线上 model.json 中记录的 AUC(读不到返回0)"""
+    try:
+        return float(json.load(open(MODEL_PATH, encoding="utf-8"))
+                      .get("auc") or 0)
+    except Exception:
+        return 0.0
+
+
+def _publish_model(version_file):
+    """版本文件 -> 原子替换线上 model.json, 并按保留数清理旧版本"""
+    tmp = MODEL_PATH + ".tmp"
+    shutil.copy(version_file, tmp)
+    os.replace(tmp, MODEL_PATH)
+    versions = sorted(f for f in os.listdir(MODELS_DIR)
+                      if f.startswith("model_v"))
+    for old in versions[:-KEEP_VERSIONS]:
+        try:
+            os.remove(os.path.join(MODELS_DIR, old))
+        except OSError:
+            pass
+
+
 def main():
     today = datetime.date.today()
     if not is_trading_day(today):
         log("跳过: {} 非交易日".format(today))
         return
     log("== 交易日, 开始每日模型迭代重训 ==")
+    ver = today.strftime("%Y%m%d")
+    version_file = os.path.join(MODELS_DIR, f"model_v{ver}.json")
     try:
-        p = subprocess.run([sys.executable, "train_model.py"],
-                           capture_output=True, text=True, cwd=BASE)
+        # 训练直接产出到版本文件; 通过AUC门槛后再原子替换线上模型
+        p = subprocess.run(
+            [sys.executable, "train_model.py", "--output", version_file],
+            capture_output=True, text=True, cwd=BASE)
         out = ((p.stdout or "") + (p.stderr or "")).strip()
         if out:
             log("\n".join("  " + l for l in out.splitlines()))
-        if p.returncode == 0:
-            log("训练完成: model.json 已更新")
-        else:
-            log("训练结束但返回值非0(可能是样本不足或数据不可用), 请查看上方日志")
+        if p.returncode != 0:
+            log("训练结束但返回值非0(可能是样本不足或数据不可用), "
+                "保守保留旧模型, 请查看上方日志")
+            return
     except Exception as e:
         log("训练异常: {!r}".format(e))
+        return
+    # ---- AUC 上线门槛: 新AUC显著下降则拒绝上线 ----
+    try:
+        new_auc = float(open(AUC_PATH, encoding="utf-8").read().strip())
+    except Exception:
+        log("无法读取新AUC, 保守保留旧模型")
+        return
+    old_auc = _current_auc()
+    log("新AUC={:.3f} 旧AUC={:.3f}".format(new_auc, old_auc))
+    if old_auc > 0 and new_auc < old_auc - AUC_DROP_LIMIT:
+        log("新AUC下降超过{}, 拒绝上线, 保留旧模型".format(AUC_DROP_LIMIT))
+        try:
+            os.remove(version_file)
+        except OSError:
+            pass
+        return
+    _publish_model(version_file)
+    log("模型已上线 v{}".format(ver))
 
 
 if __name__ == "__main__":

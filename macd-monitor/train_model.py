@@ -8,8 +8,10 @@
 3. Walk-forward 按确认日时间切分评估(无泄漏)
 4. 全量训练 LogisticRegression, 特征重要性, 保存 model.json
 
-用法: python3 train_model.py [--skip-backfill]
+用法: python3 train_model.py [--skip-backfill] [--use-cache]
+                          [--dry-run] [--output PATH]
 """
+import argparse
 import json
 import os
 import sys
@@ -24,10 +26,26 @@ import db
 from model import (FEATURES, EXPANDED, expand_features, build_features,
                    triple_barrier_label, atr_series, load_model)
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+AUC_PATH = os.path.join(BASE, "last_train_auc.txt")
+
 # --skip-backfill 时跳过阶段1; --use-cache 时复用 dataset.json
 SKIP_BACKFILL = "--skip-backfill" in sys.argv
 USE_CACHE = "--use-cache" in sys.argv
 DATASET_PATH = "dataset.json"
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="训练底背离信号质量模型")
+    ap.add_argument("--skip-backfill", action="store_true",
+                    help="跳过阶段1(signal_track回填)")
+    ap.add_argument("--use-cache", action="store_true",
+                    help="复用 dataset.json 缓存数据集")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="训练但不写 model.json(仍写 last_train_auc.txt)")
+    ap.add_argument("--output", default=None,
+                    help="输出路径, 默认 model.json")
+    return ap.parse_args()
 
 
 def log(msg):
@@ -225,11 +243,12 @@ def phase3_walk_forward(rows):
     return wf
 
 
-def phase4_train_save(rows, wf=None):
+def phase4_train_save(rows, wf=None, out_path=None, dry_run=False):
     """全量训练 + 保存model.json(含缩尾边界与样本外指标, 线上纯Python打分可直接复现)"""
     import datetime
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import roc_auc_score
+    out_path = out_path or os.path.join(BASE, "model.json")
     X = np.array([expand_features(r) for r in rows], dtype=float)
     y = np.array([r["label"] for r in rows], dtype=int)
     lo = np.percentile(X, 1, axis=0)
@@ -252,9 +271,15 @@ def phase4_train_save(rows, wf=None):
     }
     if wf:
         model["wf"] = wf
-    with open("model.json", "w", encoding="utf-8") as f:
-        json.dump(model, f, ensure_ascii=False, indent=2)
-    log(f"\n[阶段4] 全量AUC {auc:.3f}, model.json 已保存")
+    if dry_run:
+        log(f"\n[阶段4] 全量AUC {auc:.3f}, --dry-run 不写模型文件")
+    else:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(model, f, ensure_ascii=False, indent=2)
+        log(f"\n[阶段4] 全量AUC {auc:.3f}, 已保存 {out_path}")
+    # 无论是否 dry-run 都落盘, 供 retrain_daily 做上线门槛比对
+    with open(AUC_PATH, "w", encoding="utf-8") as f:
+        f.write(str(round(auc, 3)))
     log("特征重要性(标准化系数绝对值, 前15):")
     order = sorted(zip(EXPANDED, clf.coef_[0]), key=lambda kv: -abs(kv[1]))
     for name, w in order[:15]:
@@ -262,6 +287,9 @@ def phase4_train_save(rows, wf=None):
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    SKIP_BACKFILL = args.skip_backfill
+    USE_CACHE = args.use_cache
     db.init()
     if not SKIP_BACKFILL:
         phase1_backfill()
@@ -270,4 +298,4 @@ if __name__ == "__main__":
         log(f"样本不足({len(rows)}), 终止")
         sys.exit(1)
     wf = phase3_walk_forward(rows)
-    phase4_train_save(rows, wf)
+    phase4_train_save(rows, wf, out_path=args.output, dry_run=args.dry_run)

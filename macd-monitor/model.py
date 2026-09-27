@@ -258,10 +258,15 @@ def model_score(features, path=MODEL_PATH):
     """
     if not _MODEL["loaded"] and not load_model(path):
         return None
+    if (not _MODEL.get("std") or not _MODEL.get("mean")
+            or not _MODEL.get("coef")):
+        return None   # 模型文件缺关键字段(残缺/损坏), 不打分
     try:
         x = expand_features(features)
     except (KeyError, TypeError, ValueError):
         return None
+    if len(x) != len(_MODEL["coef"]):
+        return None   # 特征维度与模型系数不一致(新旧特征错配)
     for i, v in enumerate(x):
         if v is None or (isinstance(v, float) and math.isnan(v)):
             return None
