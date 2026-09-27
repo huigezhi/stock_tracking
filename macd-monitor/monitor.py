@@ -96,7 +96,11 @@ def _klines_once(code, tf, count):
                f"?param={code},m{TF_MIN[tf]},,{count}")
         r = S.get(url, timeout=8)
         # 分钟线接口的key是 m1/m5/m30/m60 (修复: 之前误用 "1m" 查不到数据)
-        rows = r.json()["data"][code].get(f"m{TF_MIN[tf]}") or []
+        # 美股等标的接口不支持: data直接返回空列表, data[code]会抛TypeError
+        data = r.json().get("data")
+        if not isinstance(data, dict) or code not in data:
+            raise ValueError(f"分钟线接口不支持该标的(返回data类型={type(data).__name__})")
+        rows = data[code].get(f"m{TF_MIN[tf]}") or []
         return [(row[0], float(row[2])) for row in rows if len(row) >= 3]
     url = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get"
            f"?param={code},{tf},,,{count},qfq")
@@ -132,8 +136,14 @@ def fetch_klines(code, tf, count, retries=2):
     streak = _fail_streak.get((code, tf), 0) + 1
     _fail_streak[(code, tf)] = streak
     if streak >= 4:
-        log.warning("获取K线失败 %s %s (已连续%d轮, 请检查网络/接口): %s",
-                    code, tf, streak, last_err)
+        # 持续失败降频告警: 首次(streak=4)立即WARNING推送, 之后每50轮提醒一次,
+        # 避免长期不可恢复的标的(如美股分钟线)每轮刷WARNING
+        if streak == 4 or streak % 50 == 0:
+            log.warning("获取K线失败 %s %s (已连续%d轮, 请检查网络/接口): %s",
+                        code, tf, streak, last_err)
+        else:
+            log.info("获取K线持续失败 %s %s (已连续%d轮): %s",
+                     code, tf, streak, last_err)
     else:
         log.info("获取K线临时失败 %s %s (第%d轮, 下轮自动重试): %s",
                  code, tf, streak, last_err)
