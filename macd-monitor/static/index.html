@@ -38,6 +38,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12h4l3-7.5 4.5 15 3-7.5h4.5"/></svg>
         <span>底背离信号</span>
       </a>
+      <a class="nav-item" data-view="mr" onclick="showView('mr')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c3.5 0 3-10 6.5-10s3 10 6.5 10 3-7 5-7"/><path d="M3 21h18"/></svg>
+        <span>均值回归</span>
+      </a>
       <a class="nav-item" data-view="ai" onclick="showView('ai')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M11 4l1.6 4L16.5 9.6 12.6 11.2 11 15.2 9.4 11.2 5.5 9.6 9.4 8z"/><path d="M18.5 13.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
         <span>AI 选股</span>
@@ -244,6 +248,57 @@
               </tr></thead>
               <tbody id="divBody">
                 <tr><td colspan="13" class="empty">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图: 均值回归 ===== -->
+      <section class="view" id="view-mr">
+        <header class="view-head">
+          <div>
+            <h2>均值回归</h2>
+            <p class="vh-sub">全A股现价偏离120日趋势价值线的程度 · 交易日16:00与底背离同批更新 · REG_Z=偏离几个σ · 点击行查看K线 · 表头点击排序</p>
+          </div>
+          <div class="vh-actions">
+            <span class="vh-meta mono" id="mrUpd"></span>
+          </div>
+        </header>
+        <div class="panel div-panel">
+          <div class="div-filters">
+            <select id="mrDate" onchange="loadMr()" title="按快照日期切换"></select>
+            <select id="mrGrade" onchange="applyMrFilters()" title="MR分级: S>=85且REG_Z<=-2, A>=70, B>=55, 按分数阈值筛选">
+              <option value="">全部</option>
+              <option value="55" selected>B级以上(分&ge;55)</option>
+              <option value="70">S/A级(分&ge;70)</option>
+              <option value="85">仅S级(分&ge;85)</option>
+            </select>
+            <label class="mr-chk"><input type="checkbox" id="mrDiv" onchange="applyMrFilters()"> 仅背离共振</label>
+            <label class="mr-chk"><input type="checkbox" id="mrTrap" onchange="applyMrFilters()"> 隐藏价值陷阱</label>
+            <input id="mrQ" placeholder="筛选名称 / 代码" oninput="applyMrFilters()">
+            <span class="div-count" id="mrCount"></span>
+          </div>
+          <div class="div-table-wrap">
+            <table class="div-table">
+              <thead><tr>
+                <th>序号</th>
+                <th class="sortable" id="mSortName" onclick="toggleMrSort('name')">股票<span class="si"></span></th>
+                <th class="sortable" id="mSortClose" onclick="toggleMrSort('close')">现价<span class="si"></span></th>
+                <th class="sortable" id="mSortMr" onclick="toggleMrSort('mr')" title="合成MR分(0-100): 偏离50+位置20+波动乖离15+安全10+确认5+背离共振10">MR分<span class="si"> ▼</span></th>
+                <th>级别</th>
+                <th class="sortable" id="mSortZ" onclick="toggleMrSort('reg_z')" title="现价相对趋势价值线的残差z-score, <=-2为深度低估">REG_Z<span class="si"></span></th>
+                <th class="sortable" id="mSortPos" onclick="toggleMrSort('pos250')" title="年内位置: 0=年内最低, 1=年内最高">年内位置<span class="si"></span></th>
+                <th class="sortable" id="mSortBias" onclick="toggleMrSort('bias20')" title="20日乖离率%">乖离20<span class="si"></span></th>
+                <th class="sortable" id="mSortAtr" onclick="toggleMrSort('atr_pct')" title="ATR14/现价, 波动率%">波动%<span class="si"></span></th>
+                <th class="sortable" id="mSortSlope" onclick="toggleMrSort('slope_ann')" title="趋势线斜率年化%, 负值=价值锚下沉">斜率%<span class="si"></span></th>
+                <th class="sortable" id="mSortChg5" onclick="toggleMrSort('chg5')">近5日%<span class="si"></span></th>
+                <th class="sortable" id="mSortChg20" onclick="toggleMrSort('chg20')">近20日%<span class="si"></span></th>
+                <th title="止跌确认: 低点抬高 / 收上5日线">确认</th>
+                <th title="背离共振 / 价值陷阱(破位+年线下行) / 跌破年线">标记</th>
+              </tr></thead>
+              <tbody id="mrBody">
+                <tr><td colspan="14" class="empty">加载中…</td></tr>
               </tbody>
             </table>
           </div>

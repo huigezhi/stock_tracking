@@ -29,6 +29,7 @@ from monitor import macd as calc_macd
 import db
 import macro
 import model as ml_model
+import mr
 import net
 import obs
 import zt
@@ -1164,9 +1165,10 @@ def _resonance(klines, closes, p1, p2, cidx, tf):
 
 
 def _scan_one_divs(stock, now):
-    """扫描单只股票的日线底背离, 只保留最近 DIV_RECENT 周期内成立的信号"""
+    """扫描单只股票的日线底背离与均值回归指标, 返回 (背离信号rows, MR快照row或None)"""
     code = stock["code"]
     rows = []
+    mr_row = None
     for tf, tf_name in (("day", "日线"),):
         try:
             klines = fetch_kline_scan(code, tf, DIV_KLINE_N)
@@ -1222,8 +1224,12 @@ def _scan_one_divs(stock, now):
                 "score": score, "tags": ",".join(tags),
                 "ml_score": ml_score,
             })
+        # 均值回归快照: 复用同一份日K(零额外网络成本), 底背离共振作加分项
+        m = mr.mr_metrics(klines[:last + 1], div_boost=bool(rows))
+        if m:
+            mr_row = {"code": code, "name": stock["name"], **m}
         time.sleep(0.05)   # 轻微限速, 避免触发行情接口WAF
-    return rows
+    return rows, mr_row
 
 
 DIV_KEEP_DAYS = 30   # 表格只展示最近30个扫描日内出现过的信号(库内保留2年供统计)
@@ -1262,23 +1268,28 @@ def _run_full_scan(scan_date):
         with DIV_LOCK:
             DIV_SCAN["total"] = len(stocks) * 2
         rows = []
+        mr_rows = []
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
             futs = [ex.submit(_scan_one_divs, s, now) for s in stocks]
             for fu in as_completed(futs):
                 try:
-                    rows.extend(fu.result())
+                    sigs, mrow = fu.result()
+                    rows.extend(sigs)
+                    if mrow:
+                        mr_rows.append(mrow)
                 except Exception:
                     pass
                 with DIV_LOCK:
                     DIV_SCAN["done"] += 2
                 hub_scan_progress()   # 每完成5%推送SSE进度事件
         db.upsert_signals(rows, scan_date)
+        db.save_mr_day(scan_date, mr_rows)
         with DIV_LOCK:
             DIV_SCAN["rows"] = db.div_rows(DIV_KEEP_DAYS)
             DIV_SCAN["ts"] = time.time()
         obs.record("INFO", "scan",
-                   f"全市场底背离扫描完成: {len(rows)}条信号入库, "
-                   f"耗时 {time.time()-t0:.0f}s")
+                   f"全市场扫描完成: 底背离{len(rows)}条入库, "
+                   f"均值回归快照{len(mr_rows)}条, 耗时 {time.time()-t0:.0f}s")
         return True
     except Exception as e:
         obs.record("ERROR", "scan", f"全市场扫描中断: {e!r}")
@@ -1955,6 +1966,13 @@ class Handler(BaseHTTPRequestHandler):
                            "done": DIV_SCAN["done"], "total": DIV_SCAN["total"],
                            "rows": rows}
             self._json(payload)
+        elif u.path == "/api/mr":
+            # 均值回归快照: 指定日(默认最新一份)按MR分降序前600条
+            date = parse_qs(u.query).get("date", [""])[0] or None
+            d, rows = db.mr_rows(date)
+            self._json({"date": d, "rows": rows, "dates": db.mr_dates(),
+                        "scanning": DIV_SCAN["scanning"],
+                        "done": DIV_SCAN["done"], "total": DIV_SCAN["total"]})
         elif u.path == "/api/kline/minute":
             # 当日分时走势(交易时段前端8s轮询, 仅当前选中标的)
             code = parse_qs(u.query).get("code", [""])[0]

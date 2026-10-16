@@ -107,7 +107,7 @@ function setTheme(mode) {
 
 /* ================= 视图路由(侧边栏导航) ================= */
 let curView = '';
-const VIEWS = ['overview', 'chart', 'div', 'ai', 'macro', 'sys'];
+const VIEWS = ['overview', 'chart', 'div', 'mr', 'ai', 'macro', 'sys'];
 
 function showView(viewId) {
   if (!VIEWS.includes(viewId)) viewId = 'overview';
@@ -129,6 +129,8 @@ function showView(viewId) {
     requestAnimationFrame(() => {
       if (window.__kchartReady) { KChart.draw(); ShareChart.draw(); }
     });
+  } else if (viewId === 'mr') {
+    loadMr();   /* 首次及每次进入刷新(离开视图期间数据可能已更新) */
   } else if (viewId === 'ai') {
     startAiView();
   } else if (viewId === 'macro') {
@@ -712,7 +714,8 @@ function handleSSE(ev) {
       `扫描中 ${ev.done}/${ev.total} (${ev.pct}%)`;
   } else if (ev.type === 'scan_done') {
     loadDivs();
-    toast('底背离全市场扫描完成');
+    loadMr();
+    toast('全市场扫描完成');
   } else if (ev.type === 'intraday') {
     setIntraday(ev.data || []);
   } else if (ev.type === 'resonance') {
@@ -1695,6 +1698,147 @@ function viewDivRow(r) {
   if (!r) return;
   openStockInChart(r.name, r.code, r.tf_name + '底背离');
   switchTf(r.tf);
+}
+
+/* ================= 均值回归视图 ================= */
+let mrAll = [];          /* 当前快照日的全部行(服务端MR分降序前600) */
+let mrFiltered = [];
+let mrScanning = false;  /* 扫描中标记(loadDivs的进度文案复用) */
+let mrRetryTimer = null;
+let mrSort = {key: 'mr', dir: 'desc'};
+const MR_SORT_COLS = {name: 'mSortName', close: 'mSortClose', mr: 'mSortMr',
+                      reg_z: 'mSortZ', pos250: 'mSortPos', bias20: 'mSortBias',
+                      atr_pct: 'mSortAtr', slope_ann: 'mSortSlope',
+                      chg5: 'mSortChg5', chg20: 'mSortChg20'};
+
+/* 拉取指定快照日(默认最新)的MR数据; 日期下拉切换时也走这里 */
+async function loadMr() {
+  const sel = document.getElementById('mrDate');
+  const date = sel ? sel.value : '';
+  try {
+    const r = await apiFetch('/api/mr' + (date ? '?date=' + encodeURIComponent(date) : ''));
+    renderMr(await r.json());
+  } catch (e) { /* 下轮重试 */ }
+}
+
+function renderMr(d) {
+  mrAll = d.rows || [];
+  mrScanning = !!d.scanning;
+  const upd = document.getElementById('mrUpd');
+  if (d.scanning) {
+    const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+    upd.textContent = `扫描中 ${d.done}/${d.total} (${pct}%)`;
+    clearTimeout(mrRetryTimer);
+    mrRetryTimer = setTimeout(loadMr, 10000);   /* 扫描期间轮询进度 */
+  } else {
+    upd.textContent = d.date ? `${d.date} 快照 · 前${mrAll.length}名` : '';
+  }
+  updateMrDateOptions(d.dates || [], d.date);
+  if (!d.date && !d.scanning) {
+    document.getElementById('mrBody').innerHTML =
+        '<tr><td colspan="14" class="empty">暂无均值回归快照（交易日 16:00 与底背离同批扫描生成）</td></tr>';
+    document.getElementById('mrCount').textContent = '';
+    return;
+  }
+  applyMrFilters();
+}
+
+/* 快照日期下拉(服务端返回可用日期, 保持用户当前选择) */
+function updateMrDateOptions(dates, cur) {
+  const sel = document.getElementById('mrDate');
+  sel.innerHTML = dates.map(dt =>
+      `<option value="${dt}">${dt}</option>`).join('') || '<option value="">--</option>';
+  sel.value = dates.includes(cur) ? cur : (dates[0] || '');
+}
+
+function toggleMrSort(key) {
+  if (mrSort.key === key) {
+    mrSort.dir = mrSort.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    mrSort = {key, dir: 'desc'};
+  }
+  for (const [k, id] of Object.entries(MR_SORT_COLS)) {
+    const el = document.getElementById(id);
+    el.querySelector('.si').textContent =
+        mrSort.key === k ? (mrSort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+  }
+  renderMrTable();
+}
+
+function applyMrFilters() {
+  const q = document.getElementById('mrQ').value.trim().toLowerCase();
+  const gv = Number(document.getElementById('mrGrade').value);
+  const onlyDiv = document.getElementById('mrDiv').checked;
+  const hideTrap = document.getElementById('mrTrap').checked;
+  mrFiltered = mrAll.filter(r =>
+      (!gv || (r.mr != null && r.mr >= gv)) &&
+      (!onlyDiv || r.div_flag) &&
+      (!hideTrap || !r.trap) &&
+      (!q || (r.name || '').toLowerCase().includes(q) ||
+               r.code.toLowerCase().includes(q)));
+  renderMrTable();
+}
+
+function renderMrTable() {
+  const body = document.getElementById('mrBody');
+  document.getElementById('mrCount').textContent =
+      mrAll.length ? `${mrFiltered.length} / ${mrAll.length} 条` : '';
+  if (!mrAll.length) {
+    body.innerHTML = mrScanning
+        ? '<tr><td colspan="14" class="empty">正在扫描, 片刻后自动刷新…</td></tr>'
+        : '<tr><td colspan="14" class="empty">该日暂无快照数据</td></tr>';
+    return;
+  }
+  if (!mrFiltered.length) {
+    body.innerHTML = '<tr><td colspan="14" class="empty">无符合条件的标的</td></tr>';
+    return;
+  }
+  let rows = mrFiltered;
+  if (mrSort.key) {
+    const k = mrSort.key, s = mrSort.dir === 'desc' ? -1 : 1;
+    rows = [...mrFiltered].sort((a, b) => {
+      const va = a[k], vb = b[k];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;   /* 空值恒排最后 */
+      if (vb == null) return -1;
+      return va < vb ? -s : va > vb ? s : 0;
+    });
+  }
+  const fmtPct = v => v == null ? '--' :
+      `<span class="${v > 0 ? 'up' : v < 0 ? 'down' : ''}">${v > 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+  const gradeCls = {S: 'sc-hi', A: 'sc-mid', B: 'sc-lo', C: ''};
+  const idxOf = new Map(mrFiltered.map((r, i) => [r, i]));
+  body.innerHTML = rows.map(r => `
+    <tr class="div-row" onclick="viewMrIdx(${idxOf.get(r)})">
+      <td class="di">${idxOf.get(r) + 1}</td>
+      <td class="dstock"><span class="dn">${esc(r.name)}</span><span class="dc">${r.code}</span></td>
+      <td class="dv">${r.close != null ? r.close.toFixed(2) : '--'}</td>
+      <td class="dv dsc"><b class="${r.mr >= 85 ? 'sc-hi' : r.mr >= 70 ? 'sc-mid' : 'sc-lo'}">${r.mr}</b></td>
+      <td class="dv"><span class="grade-b ${gradeCls[r.grade] || ''}">${r.grade}</span></td>
+      <td class="dv ${r.reg_z != null ? (r.reg_z <= -2 ? 'down' : r.reg_z >= 2 ? 'up' : '') : ''}">${r.reg_z != null ? r.reg_z.toFixed(2) : '--'}</td>
+      <td class="dv">${r.pos250 != null ? (r.pos250 * 100).toFixed(0) + '%' : '--'}</td>
+      <td class="dv ${r.bias20 < 0 ? 'down' : 'up'}">${r.bias20 != null ? r.bias20.toFixed(2) + '%' : '--'}</td>
+      <td class="dv">${r.atr_pct != null ? r.atr_pct.toFixed(2) : '--'}</td>
+      <td class="dv ${r.slope_ann != null ? (r.slope_ann < 0 ? 'down' : 'up') : ''}">${r.slope_ann != null ? (r.slope_ann > 0 ? '+' : '') + r.slope_ann.toFixed(1) : '--'}</td>
+      <td class="dv">${fmtPct(r.chg5)}</td>
+      <td class="dv">${fmtPct(r.chg20)}</td>
+      <td class="dv">${r.confirm ? `<span class="tagb">${r.confirm === 'lpr+ma5' ? '双确认' : r.confirm === 'lpr' ? '低点抬高' : '上5日线'}</span>` : '--'}</td>
+      <td class="dv">${mrBadges(r)}</td>
+    </tr>`).join('');
+}
+
+/* 标记徽章: 背离共振 / 价值陷阱 / 跌破年线 */
+function mrBadges(r) {
+  const out = [];
+  if (r.div_flag) out.push('<span class="prio-b prio-high">背离共振</span>');
+  if (r.trap) out.push('<span class="prio-b prio-low">陷阱</span>');
+  else if (r.below_ma250) out.push('<span class="prio-b prio-low">破年线</span>');
+  return out.length ? out.join(' ') : '--';
+}
+
+function viewMrIdx(i) {
+  const r = mrFiltered[i];
+  if (r) openStockInChart(r.name, r.code, '均值回归');
 }
 
 /* ================= 复盘统计弹窗 ================= */

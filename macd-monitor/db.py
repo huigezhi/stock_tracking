@@ -34,8 +34,6 @@ CREATE TABLE IF NOT EXISTS div_signal(
 CREATE INDEX IF NOT EXISTS idx_div_confirm ON div_signal(confirm);
 CREATE INDEX IF NOT EXISTS idx_div_scan_last ON div_signal(scan_last);
 CREATE INDEX IF NOT EXISTS idx_div_confirm_tf ON div_signal(confirm DESC, tf);
-CREATE INDEX IF NOT EXISTS idx_sig_track_fwd20
-  ON signal_track(fwd20) WHERE fwd20 IS NOT NULL;
 
 -- 信号跟踪: 确认日收盘后N个交易日收益%(自confirm_close), 供复盘统计
 CREATE TABLE IF NOT EXISTS signal_track(
@@ -44,6 +42,8 @@ CREATE TABLE IF NOT EXISTS signal_track(
   upd TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_track_upd ON signal_track(upd);
+CREATE INDEX IF NOT EXISTS idx_sig_track_fwd20
+  ON signal_track(fwd20) WHERE fwd20 IS NOT NULL;
 
 -- AI选股结果: 每个选股日(pick_date)一组, rank 1-10; source: ai=deepseek精选 / model=模型分降级
 CREATE TABLE IF NOT EXISTS ai_pick(
@@ -91,6 +91,21 @@ CREATE TABLE IF NOT EXISTS fin_quality(
   eps REAL, ocf_ps REAL, ccr REAL, ccr_avg REAL,
   report_date TEXT, updated TEXT
 );
+
+-- 均值回归全市场快照: 每交易日一份(16:00扫描同批生成), 保留30天
+-- mr=合成分(0-100), grade=S/A/B/C, div_flag=近日底背离共振, trap=价值陷阱
+CREATE TABLE IF NOT EXISTS mr_snapshot(
+  date TEXT NOT NULL, code TEXT NOT NULL,
+  name TEXT, close REAL,
+  reg_z REAL, bias20 REAL, bias60 REAL,
+  pos250 REAL, atr_pct REAL, slope_ann REAL,
+  below_ma250 INTEGER, trap INTEGER, div_flag INTEGER,
+  confirm TEXT, chg5 REAL, chg20 REAL,
+  mr INTEGER, grade TEXT,
+  PRIMARY KEY(date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_mr_date ON mr_snapshot(date);
+CREATE INDEX IF NOT EXISTS idx_mr_score ON mr_snapshot(date, mr DESC);
 
 -- 全市场扫描K线缓存: 每标的每周期一份, 每日扫描最多一次网络拉取;
 -- 列序与 webui.fetch_kline 完全一致 [date, open, close, high, low, volume]
@@ -144,6 +159,7 @@ def init():
     _migrate_legacy()
     prune()
     prune_zt()
+    prune_mr()
 
 
 def _migrate_legacy():
@@ -412,6 +428,58 @@ def pick_hist_series(days=30):
     for r in rows:
         by_date.setdefault(r["d"], {})[r["src"]] = {"n": r["n"], "win5": r["win5"]}
     return [{"date": d, **v} for d, v in sorted(by_date.items())]
+
+
+# ---------------- 均值回归全市场快照 ----------------
+
+def save_mr_day(day, rows):
+    """保存一个交易日的均值回归快照(同日覆盖);
+    rows=[{code,name,close,reg_z,...,mr,grade}, ...] 来自扫描同批计算"""
+    with conn() as c:
+        c.execute("DELETE FROM mr_snapshot WHERE date=?", (day,))
+        c.executemany(
+            """INSERT OR REPLACE INTO mr_snapshot
+               (date, code, name, close, reg_z, bias20, bias60, pos250,
+                atr_pct, slope_ann, below_ma250, trap, div_flag, confirm,
+                chg5, chg20, mr, grade)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [(day, r["code"], r.get("name"), r.get("close"), r.get("reg_z"),
+              r.get("bias20"), r.get("bias60"), r.get("pos250"),
+              r.get("atr_pct"), r.get("slope_ann"), r.get("below_ma250"),
+              r.get("trap"), r.get("div_flag"), r.get("confirm"),
+              r.get("chg5"), r.get("chg20"), r.get("mr"), r.get("grade"))
+             for r in rows])
+
+
+def mr_rows(date=None, limit=600):
+    """指定日(默认最近一份)MR快照, 按MR分降序取前limit条"""
+    with conn() as c:
+        d = date or c.execute(
+            "SELECT MAX(date) FROM mr_snapshot").fetchone()[0]
+        if not d:
+            return None, []
+        rows = c.execute(
+            """SELECT date AS scan, code, name, close, reg_z, bias20, bias60,
+                      pos250, atr_pct, slope_ann, below_ma250, trap, div_flag,
+                      confirm, chg5, chg20, mr, grade
+               FROM mr_snapshot WHERE date=? ORDER BY mr DESC LIMIT ?""",
+            (d, int(limit))).fetchall()
+        return d, [dict(r) for r in rows]
+
+
+def mr_dates(limit=30):
+    """可用快照日期(降序, 供前端日期下拉)"""
+    with conn() as c:
+        return [r[0] for r in c.execute(
+            "SELECT DISTINCT date FROM mr_snapshot"
+            " ORDER BY date DESC LIMIT ?", (int(limit),)).fetchall()]
+
+
+def prune_mr(keep_days=30):
+    """清理过期MR快照(默认保留30天)"""
+    with conn() as c:
+        c.execute("DELETE FROM mr_snapshot WHERE date < date('now', ?)",
+                  (f"-{keep_days} day",))
 
 
 # ---------------- 涨停股池与情绪 ----------------
